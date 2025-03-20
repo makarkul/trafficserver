@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  android-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.android
+    volumes:
+      - ./config:/usr/local/src/trafficserver-9.2.0/config
+      - ./android-build:/output
+    command: cp /trafficserver-android-arm64-v8a.tar.gz /output/
