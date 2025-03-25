@@ -1,0 +1,3 @@
+rootProject.name = "SimpleTrafficServer"
+include ':app'
+include ':test-app'
