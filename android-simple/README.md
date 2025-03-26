@@ -2,6 +2,72 @@
 
 A lightweight implementation of Apache TrafficServer features for Android, demonstrating core proxy server functionality, URL remapping, and caching.
 
+## Comparison with Apache TrafficServer
+
+### Architecture
+
+| Feature | Apache TrafficServer | Android Simple TrafficServer |
+|---------|---------------------|----------------------------|
+| Platform | Linux/Unix systems | Android (Java/Native) |
+| Architecture | Multi-threaded event-driven | Single-process Android service |
+| Memory Model | Shared memory for cache | In-memory cache per process |
+| Configuration | Complex config files system | Programmatic configuration |
+| Scale | Enterprise-grade, high-performance | Single device, lightweight |
+
+### Features
+
+| Feature | Apache TrafficServer | Android Simple TrafficServer |
+|---------|---------------------|----------------------------|
+| HTTP/HTTPS | Full support with advanced features | Basic support |
+| Caching | Disk-based with RAM cache | In-memory only (60s TTL) |
+| URL Remapping | Complex rules with regex support | Basic map directives |
+| Plugins | Extensive plugin system | No plugin support |
+| Protocols | HTTP/1.x, HTTP/2, TLS | HTTP/1.1 only |
+| Monitoring | Traffic Top, Stats API | Basic logging and UI stats |
+
+### Use Cases
+
+**Apache TrafficServer**
+- Enterprise CDN deployments
+- Large-scale reverse proxy
+- Complex caching hierarchies
+- High-throughput environments
+- Multi-datacenter setups
+
+**Android Simple TrafficServer**
+- Mobile app proxy needs
+- Development and testing
+- Learning/Educational purposes
+- Single-device caching
+- Basic URL remapping
+
+### Performance
+
+| Aspect | Apache TrafficServer | Android Simple TrafficServer |
+|--------|---------------------|----------------------------|
+| Connections | 10000s concurrent | 10s concurrent |
+| Cache Size | Multiple TB | Limited by device memory |
+| Throughput | Gbps range | Limited by mobile network |
+| Latency | Sub-millisecond | Milliseconds range |
+
+### Key Differences
+
+1. **Simplicity vs Functionality**
+   - Apache TS: Full-featured, complex configuration
+   - Android Simple: Minimalist, programmatic setup
+
+2. **Resource Usage**
+   - Apache TS: Optimized for server hardware
+   - Android Simple: Optimized for mobile devices
+
+3. **Development Focus**
+   - Apache TS: Enterprise features, scalability
+   - Android Simple: Android integration, simplicity
+
+4. **Target Environment**
+   - Apache TS: Data centers, edge servers
+   - Android Simple: Individual Android devices
+
 ## Features
 
 ### 1. Proxy Server
