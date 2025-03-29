@@ -3,6 +3,7 @@
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </base-config>
     <domain-config cleartextTrafficPermitted="true">
@@ -10,8 +11,10 @@
         <domain includeSubdomains="true">127.0.0.1</domain>
         <domain includeSubdomains="true">example.com</domain>
         <domain includeSubdomains="true">info.cern.ch</domain>
+        <domain includeSubdomains="true">api.github.com</domain>
         <trust-anchors>
             <certificates src="system" />
+            <certificates src="user" />
         </trust-anchors>
     </domain-config>
 </network-security-config>

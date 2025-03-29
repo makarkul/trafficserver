@@ -12,7 +12,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Dns
 import org.apache.trafficserver.test.databinding.ActivityMainBinding
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.util.concurrent.TimeUnit
@@ -76,15 +78,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    companion object {
+        private const val TAG = "ProxyTest"
+    }
+
     private fun makeRequest(useProxy: Boolean) {
+        android.util.Log.d(TAG, "Making ${if (useProxy) "proxy" else "direct"} request...")
+        binding.buttonDirectRequest.isEnabled = false
+        binding.buttonProxyRequest.isEnabled = false
         lifecycleScope.launch {
             try {
                 if (useProxy) {
                     // Start TrafficServer proxy if not running
                     Intent(this@MainActivity, TrafficServerProxyService::class.java).also { intent ->
                         startForegroundService(intent)
-                        // Wait a bit for the proxy to start
-                        Thread.sleep(1000)
+                    }
+
+                    // Wait for proxy to start and check if it's running
+                    try {
+                        withContext(Dispatchers.IO) {
+                            // Wait a bit for the proxy to start
+                            Thread.sleep(1000)
+
+                            // Check if proxy is running
+                            val socket = Socket()
+                            try {
+                                socket.connect(InetSocketAddress("127.0.0.1", 8888), 1000)
+                                socket.close()
+                            } catch (e: Exception) {
+                                throw e
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e(TAG, "Proxy not running", e)
+                        binding.textResult.text = "Error: Proxy not running"
+                        binding.buttonDirectRequest.isEnabled = true
+                        binding.buttonProxyRequest.isEnabled = true
+                        return@launch
                     }
                 }
 
@@ -94,11 +124,17 @@ class MainActivity : AppCompatActivity() {
                 
                 val startTime = System.currentTimeMillis()
                 val result = withContext(Dispatchers.IO) {
-                    val client = createHttpClient(useProxy)
-                    val url = binding.spinnerUrls.selectedItem.toString()
-                    val request = Request.Builder()
-                        .url(url)
-                        .build()
+                    android.util.Log.d(TAG, "Creating request...")
+                val client = createHttpClient(useProxy)
+                val url = binding.spinnerUrls.selectedItem.toString()
+                android.util.Log.d(TAG, "URL: $url")
+                val request = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "TrafficServer-Test/1.0")
+                    .header("Accept", "*/*")
+                    .build()
+                android.util.Log.d(TAG, "Request headers: ${request.headers}")
+                android.util.Log.d(TAG, "Executing request...")
                         
                     client.newCall(request).execute().use { response ->
                         val endTime = System.currentTimeMillis()
@@ -145,6 +181,8 @@ class MainActivity : AppCompatActivity() {
                 
                 binding.textResult.text = result
             } catch (e: Exception) {
+                android.util.Log.e("ProxyTest", "Request failed", e)
+                android.util.Log.e("ProxyTest", "Stack trace: ${e.stackTraceToString()}")
                 binding.textResult.text = "Error: ${e.message}"
                 Toast.makeText(this@MainActivity, "Request failed", Toast.LENGTH_SHORT).show()
             } finally {
@@ -155,31 +193,39 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun createHttpClient(useProxy: Boolean): OkHttpClient {
+        android.util.Log.d(TAG, "Creating HTTP client (useProxy=$useProxy)")
         return OkHttpClient.Builder().apply {
             if (useProxy) {
-                android.util.Log.d("ProxyTest", "Creating client with proxy...")
+                android.util.Log.d(TAG, "Creating client with proxy...")
                 proxy(Proxy(
-                    Proxy.Type.HTTP,  // Use HTTP proxy type for both HTTP and HTTPS
+                    Proxy.Type.HTTP,
                     InetSocketAddress("127.0.0.1", 8888)
                 ))
-                // Trust all certificates when going through proxy
-                val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                    override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-                })
-                val sslContext = SSLContext.getInstance("SSL")
-                sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-                sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
-                hostnameVerifier { _, _ -> true }
+            } else {
+                proxy(Proxy.NO_PROXY)
             }
+
+            // Add logging interceptor
+            addInterceptor { chain ->
+                val request = chain.request()
+                android.util.Log.d(TAG, "${request.method} ${request.url}")
+                android.util.Log.d(TAG, "Request headers: ${request.headers}")
+                try {
+                    chain.proceed(request).also { response ->
+                        android.util.Log.d(TAG, "Response: ${response.code} ${response.message}")
+                        android.util.Log.d(TAG, "Response headers: ${response.headers}")
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e(TAG, "Request failed: ${e.message}")
+                    throw e
+                }
+            }
+
             connectTimeout(10, TimeUnit.SECONDS)
             readTimeout(10, TimeUnit.SECONDS)
             writeTimeout(10, TimeUnit.SECONDS)
         }.build().also { client ->
-            if (useProxy) {
-                android.util.Log.d("ProxyTest", "Created client with proxy: ${client.proxy}")
-            }
+            android.util.Log.d(TAG, "Created client with proxy: ${client.proxy}")
         }
     }
 }

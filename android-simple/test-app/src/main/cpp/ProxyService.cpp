@@ -15,6 +15,8 @@
 #include <vector>
 #include <map>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 
 #define LOG_TAG "ProxyService"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -32,16 +34,94 @@ static int serverSocket = -1;
 static std::thread proxyThread;
 static std::vector<RemapRule> remapRules;
 
-struct CacheEntry {
-    std::string content;
-    std::string contentType;
-    std::chrono::system_clock::time_point timestamp;
-    std::string etag;
+class DiskCache {
+public:
+    struct CacheEntry {
+        std::string content;
+        std::string contentType;
+        std::chrono::system_clock::time_point timestamp;
+        std::string etag;
+    };
+
+    DiskCache(const std::string& cacheDir) : cacheDir_(cacheDir) {
+        std::filesystem::create_directories(cacheDir);
+        LOGI("Initialized disk cache at: %s", cacheDir.c_str());
+    }
+
+    void put(const std::string& key, const CacheEntry& entry) {
+        std::string path = getPath(key);
+        std::ofstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            // Write timestamp
+            auto timestamp = std::chrono::system_clock::to_time_t(entry.timestamp);
+            file.write(reinterpret_cast<const char*>(&timestamp), sizeof(timestamp));
+
+            // Write content type length and content
+            size_t len = entry.contentType.length();
+            file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            file.write(entry.contentType.c_str(), len);
+
+            // Write etag length and content
+            len = entry.etag.length();
+            file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            file.write(entry.etag.c_str(), len);
+
+            // Write content length and content
+            len = entry.content.length();
+            file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+            file.write(entry.content.c_str(), len);
+
+            LOGI("Cached %s (%zu bytes)", key.c_str(), entry.content.length());
+        }
+    }
+
+    std::optional<CacheEntry> get(const std::string& key) {
+        std::string path = getPath(key);
+        std::ifstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            CacheEntry entry;
+
+            // Read timestamp
+            std::time_t timestamp;
+            file.read(reinterpret_cast<char*>(&timestamp), sizeof(timestamp));
+            entry.timestamp = std::chrono::system_clock::from_time_t(timestamp);
+
+            // Read content type
+            size_t len;
+            file.read(reinterpret_cast<char*>(&len), sizeof(len));
+            entry.contentType.resize(len);
+            file.read(&entry.contentType[0], len);
+
+            // Read etag
+            file.read(reinterpret_cast<char*>(&len), sizeof(len));
+            entry.etag.resize(len);
+            file.read(&entry.etag[0], len);
+
+            // Read content
+            file.read(reinterpret_cast<char*>(&len), sizeof(len));
+            entry.content.resize(len);
+            file.read(&entry.content[0], len);
+
+            return entry;
+        }
+        return std::nullopt;
+    }
+
+private:
+    std::string getPath(const std::string& key) {
+        // Create a filename-safe hash of the key
+        std::hash<std::string> hasher;
+        std::string filename = std::to_string(hasher(key));
+        return cacheDir_ + "/" + filename;
+    }
+
+    std::string cacheDir_;
 };
 
-static std::map<std::string, CacheEntry> cache;
+static std::unique_ptr<DiskCache> cache;
 
 void* proxyLoop(void*) {
+    LOGI("ProxyLoop: Creating socket...");
     serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSocket < 0) {
         LOGE("Failed to create socket");
@@ -50,6 +130,7 @@ void* proxyLoop(void*) {
 
     // Enable address reuse
     int opt = 1;
+    LOGI("ProxyLoop: Setting socket options...");
     if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
         LOGE("Failed to set socket options");
         close(serverSocket);
@@ -58,14 +139,15 @@ void* proxyLoop(void*) {
 
     struct sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
     serverAddr.sin_port = htons(8888); // Port for proxy server
 
     if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        LOGE("Failed to bind socket");
+        LOGE("Failed to bind socket: %s", strerror(errno));
         close(serverSocket);
         return nullptr;
     }
+    LOGI("Successfully bound to 127.0.0.1:8888");
 
     if (listen(serverSocket, 5) < 0) {
         LOGE("Failed to listen on socket");
@@ -208,11 +290,10 @@ void* proxyLoop(void*) {
                                 std::string cacheKey = host + path;
                                 bool cacheHit = false;
                                 
-                                auto cacheIt = cache.find(cacheKey);
-                                if (cacheIt != cache.end()) {
+                                if (auto cacheEntry = cache->get(cacheKey)) {
                                     auto now = std::chrono::system_clock::now();
                                     auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                                        now - cacheIt->second.timestamp).count();
+                                        now - cacheEntry->timestamp).count();
                                     
                                     // Cache TTL of 60 seconds for testing
                                     if (age < 60) {
@@ -221,17 +302,17 @@ void* proxyLoop(void*) {
                                         
                                         // Send cached response with cache headers
                                         std::string cachedResponse = "HTTP/1.1 200 OK\r\n";
-                                        cachedResponse += "Content-Type: " + cacheIt->second.contentType + "\r\n";
-                                        cachedResponse += "Content-Length: " + std::to_string(cacheIt->second.content.length()) + "\r\n";
+                                        cachedResponse += "Content-Type: " + cacheEntry->contentType + "\r\n";
+                                        cachedResponse += "Content-Length: " + std::to_string(cacheEntry->content.length()) + "\r\n";
                                         cachedResponse += "X-Cache: HIT\r\n";
                                         cachedResponse += "X-Cache-Age: " + std::to_string(age) + "\r\n";
                                         cachedResponse += "X-Proxy-Through: TrafficServer-Android\r\n";
                                         cachedResponse += "Via: 1.1 TrafficServer-Android\r\n";
-                                        if (!cacheIt->second.etag.empty()) {
-                                            cachedResponse += "ETag: " + cacheIt->second.etag + "\r\n";
+                                        if (!cacheEntry->etag.empty()) {
+                                            cachedResponse += "ETag: " + cacheEntry->etag + "\r\n";
                                         }
                                         cachedResponse += "\r\n";
-                                        cachedResponse += cacheIt->second.content;
+                                        cachedResponse += cacheEntry->content;
                                         
                                         send(clientSocket, cachedResponse.c_str(), cachedResponse.length(), 0);
                                     }
@@ -293,12 +374,12 @@ void* proxyLoop(void*) {
                                     }
                                     
                                     // Cache the response if it's cacheable (for this demo, we cache everything)
-                                    CacheEntry entry;
+                                    DiskCache::CacheEntry entry;
                                     entry.content = responseBody;
                                     entry.contentType = contentType;
                                     entry.timestamp = std::chrono::system_clock::now();
                                     entry.etag = etag;
-                                    cache[cacheKey] = entry;
+                                    cache->put(cacheKey, entry);
                                     
                                     LOGI("Cached response for %s (size: %zu bytes)", 
                                          cacheKey.c_str(), responseBody.length());
@@ -328,7 +409,9 @@ extern "C" {
 JNIEXPORT jint JNICALL
 Java_org_apache_trafficserver_test_TrafficServerProxyService_startProxy(
         JNIEnv *env, jobject thiz, jstring configPath) {
+    LOGI("Starting proxy service...");
     if (proxyRunning) {
+        LOGI("Proxy already running");
         return 1; // Already running
     }
 
@@ -377,8 +460,14 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_startProxy(
         env->ReleaseStringUTFChars(configPath, configPathStr);
     }
 
+    LOGI("Initializing proxy service...");
+    // Initialize disk cache
+    std::string cachePath = std::string(configPathStr) + "/cache";
+    cache = std::make_unique<DiskCache>(cachePath);
+    
     proxyRunning = true;
     proxyThread = std::thread(proxyLoop, nullptr);
+    LOGI("Proxy service started successfully");
     return 0;
 }
 

@@ -30,11 +30,14 @@ class TrafficServerProxyService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        android.util.Log.i("ProxyService", "Starting proxy service...")
         val notification = createNotification()
         startForeground(NOTIFICATION_ID, notification)
 
         val configPath = getConfigPath()
-        startProxy(configPath)
+        android.util.Log.i("ProxyService", "Using config path: $configPath")
+        val result = startProxy(configPath)
+        android.util.Log.i("ProxyService", "Proxy start result: $result")
 
         return START_STICKY
     }
@@ -71,8 +74,10 @@ class TrafficServerProxyService : Service() {
     private fun getConfigPath(): String {
         // Create config directory if it doesn't exist
         val configDir = getDir("config", Context.MODE_PRIVATE)
+        android.util.Log.i("ProxyService", "Config dir path: ${configDir.absolutePath}")
         if (!configDir.exists()) {
-            configDir.mkdirs()
+            val created = configDir.mkdirs()
+            android.util.Log.i("ProxyService", "Created config dir: $created")
         }
 
         // Create remap.config if it doesn't exist
