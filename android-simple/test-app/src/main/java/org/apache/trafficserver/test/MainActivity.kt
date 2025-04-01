@@ -42,6 +42,34 @@ class MainActivity : AppCompatActivity() {
         binding.buttonProxyRequest.setOnClickListener {
             makeRequest(useProxy = true)
         }
+
+        binding.buttonToggleProxy.setOnClickListener {
+            lifecycleScope.launch {
+                if (checkProxyRunning()) {
+                    // Stop proxy
+                    Intent(this@MainActivity, TrafficServerProxyService::class.java).also { intent ->
+                        stopService(intent)
+                    }
+                    binding.buttonToggleProxy.text = "Start Proxy"
+                    binding.textResult.text = "Proxy stopped"
+                } else {
+                    // Start proxy
+                    Intent(this@MainActivity, TrafficServerProxyService::class.java).also { intent ->
+                        startForegroundService(intent)
+                    }
+                    // Wait for proxy to start
+                    withContext(Dispatchers.IO) {
+                        Thread.sleep(1000)
+                    }
+                    if (checkProxyRunning()) {
+                        binding.buttonToggleProxy.text = "Stop Proxy"
+                        binding.textResult.text = "Proxy started on port 8888"
+                    } else {
+                        binding.textResult.text = "Failed to start proxy"
+                    }
+                }
+            }
+        }
         
         // Add test URLs
         binding.spinnerUrls.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf(

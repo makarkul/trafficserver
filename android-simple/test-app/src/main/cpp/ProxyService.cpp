@@ -77,6 +77,7 @@ public:
 
     std::optional<CacheEntry> get(const std::string& key) {
         std::string path = getPath(key);
+        LOGI("Looking for cache file at: %s", path.c_str());
         std::ifstream file(path, std::ios::binary);
         if (file.is_open()) {
             CacheEntry entry;
@@ -111,14 +112,18 @@ private:
     std::string getPath(const std::string& key) {
         // Create a filename-safe hash of the key
         std::hash<std::string> hasher;
-        std::string filename = std::to_string(hasher(key));
+        size_t hash = hasher(key);
+        std::string filename = std::to_string(hash);
+        LOGI("Cache key: %s, Hash: %zu, Filename: %s", key.c_str(), hash, filename.c_str());
         return cacheDir_ + "/" + filename;
     }
-
     std::string cacheDir_;
 };
 
 static std::unique_ptr<DiskCache> cache;
+
+// Forward declaration
+static void handleClientConnection(int socket);
 
 void* proxyLoop(void*) {
     LOGI("ProxyLoop: Creating socket...");
@@ -137,20 +142,22 @@ void* proxyLoop(void*) {
         return nullptr;
     }
 
+    // Bind to port 8888
     struct sockaddr_in serverAddr;
+    memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    serverAddr.sin_port = htons(8888); // Port for proxy server
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(8888);
 
     if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
-        LOGE("Failed to bind socket: %s", strerror(errno));
+        LOGE("Failed to bind server socket");
         close(serverSocket);
         return nullptr;
     }
-    LOGI("Successfully bound to 127.0.0.1:8888");
 
-    if (listen(serverSocket, 5) < 0) {
-        LOGE("Failed to listen on socket");
+    // Start listening
+    if (listen(serverSocket, SOMAXCONN) < 0) {
+        LOGE("Failed to listen on server socket");
         close(serverSocket);
         return nullptr;
     }
@@ -169,239 +176,193 @@ void* proxyLoop(void*) {
             continue;
         }
 
-        // Handle client connection in a new thread
-        std::thread([clientSocket]() {
-            char buffer[8192];
-            ssize_t n = recv(clientSocket, buffer, sizeof(buffer)-1, 0);
-            if (n > 0) {
-                buffer[n] = '\0';
-                LOGI("Received request: %s", buffer);
-
-                // Parse the request line to get the target URL
-                std::string request(buffer);
-                size_t firstSpace = request.find(' ');
-                size_t secondSpace = request.find(' ', firstSpace + 1);
-                if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
-                    std::string url = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
-                    LOGI("Target URL: %s", url.c_str());
-
-                    // Create a socket to connect to the target server
-                    struct addrinfo hints = {}, *res;
-                    hints.ai_family = AF_UNSPEC;
-                    hints.ai_socktype = SOCK_STREAM;
-
-                    // Parse URL to get host and path
-                    std::string host, path, port = "80";
-                    bool isConnect = request.substr(0, firstSpace) == "CONNECT";
-
-                    if (isConnect) {
-                        // For CONNECT, URL is in the form host:port
-                        size_t colonPos = url.find(':');
-                        if (colonPos != std::string::npos) {
-                            host = url.substr(0, colonPos);
-                            port = url.substr(colonPos + 1);
-                        } else {
-                            host = url;
-                            port = "443";
-                        }
-                        path = "/";
-                    } else if (url.substr(0, 7) == "http://") {
-                        size_t hostStart = 7;
-                        size_t hostEnd = url.find('/', hostStart);
-                        if (hostEnd == std::string::npos) {
-                            host = url.substr(hostStart);
-                            path = "/";
-                        } else {
-                            host = url.substr(hostStart, hostEnd - hostStart);
-                            path = url.substr(hostEnd);
-                        }
-
-                        // Check for remap rules
-                        bool remapped = false;
-                        for (const auto& rule : remapRules) {
-                            if (host == rule.fromHost && (path == rule.fromPath || rule.fromPath == "/")) {
-                                LOGI("Remapping request: %s%s -> %s%s",
-                                     host.c_str(), path.c_str(),
-                                     rule.toHost.c_str(), rule.toPath.c_str());
-                                host = rule.toHost;
-                                path = rule.toPath;
-                                remapped = true;
-                                break;
-                            }
-                        }
-                        if (!remapped) {
-                            LOGI("No remap rule found for: %s%s", host.c_str(), path.c_str());
-                        }
-                    } else {
-                        LOGE("Only HTTP and HTTPS (via CONNECT) are supported");
-                        close(clientSocket);
-                        return;
-                    }
-
-                    LOGI("Host: %s, Path: %s", host.c_str(), path.c_str());
-
-                    // Connect to target server
-                    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
-                        int serverSock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-                        if (serverSock >= 0 && connect(serverSock, res->ai_addr, res->ai_addrlen) == 0) {
-                            if (isConnect) {
-                                // For CONNECT, send 200 OK to client
-                                std::string response = "HTTP/1.1 200 Connection established\r\n"
-                                                     "Proxy-Agent: TrafficServer\r\n"
-                                                     "X-Proxy-Through: TrafficServer-Android\r\n"
-                                                     "\r\n";
-                                send(clientSocket, response.c_str(), response.length(), 0);
-
-                                // Now tunnel data between client and server
-                                fd_set readfds;
-                                int maxfd = std::max(clientSocket, serverSock) + 1;
-
-                                while (true) {
-                                    FD_ZERO(&readfds);
-                                    FD_SET(clientSocket, &readfds);
-                                    FD_SET(serverSock, &readfds);
-
-                                    if (select(maxfd, &readfds, nullptr, nullptr, nullptr) < 0) {
-                                        break;
-                                    }
-
-                                    if (FD_ISSET(clientSocket, &readfds)) {
-                                        n = recv(clientSocket, buffer, sizeof(buffer), 0);
-                                        if (n <= 0) break;
-                                        send(serverSock, buffer, n, 0);
-                                    }
-
-                                    if (FD_ISSET(serverSock, &readfds)) {
-                                        n = recv(serverSock, buffer, sizeof(buffer), 0);
-                                        if (n <= 0) break;
-                                        send(clientSocket, buffer, n, 0);
-                                    }
-                                }
-                            } else {
-                                // For HTTP, forward modified request
-                                std::string modifiedRequest = "GET " + path + " HTTP/1.1\r\n"
-                                                            "Host: " + host + "\r\n"
-                                                            "Connection: close\r\n"
-                                                            "X-Proxy-Through: TrafficServer-Android\r\n"
-                                                            "\r\n";
-                                send(serverSock, modifiedRequest.c_str(), modifiedRequest.length(), 0);
-
-                                // Check cache first
-                                std::string cacheKey = host + path;
-                                bool cacheHit = false;
-                                
-                                if (auto cacheEntry = cache->get(cacheKey)) {
-                                    auto now = std::chrono::system_clock::now();
-                                    auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                                        now - cacheEntry->timestamp).count();
-                                    
-                                    // Cache TTL of 60 seconds for testing
-                                    if (age < 60) {
-                                        cacheHit = true;
-                                        LOGI("Cache hit for %s (age: %lld seconds)", cacheKey.c_str(), age);
-                                        
-                                        // Send cached response with cache headers
-                                        std::string cachedResponse = "HTTP/1.1 200 OK\r\n";
-                                        cachedResponse += "Content-Type: " + cacheEntry->contentType + "\r\n";
-                                        cachedResponse += "Content-Length: " + std::to_string(cacheEntry->content.length()) + "\r\n";
-                                        cachedResponse += "X-Cache: HIT\r\n";
-                                        cachedResponse += "X-Cache-Age: " + std::to_string(age) + "\r\n";
-                                        cachedResponse += "X-Proxy-Through: TrafficServer-Android\r\n";
-                                        cachedResponse += "Via: 1.1 TrafficServer-Android\r\n";
-                                        if (!cacheEntry->etag.empty()) {
-                                            cachedResponse += "ETag: " + cacheEntry->etag + "\r\n";
-                                        }
-                                        cachedResponse += "\r\n";
-                                        cachedResponse += cacheEntry->content;
-                                        
-                                        send(clientSocket, cachedResponse.c_str(), cachedResponse.length(), 0);
-                                    }
-                                }
-                                
-                                if (!cacheHit) {
-                                    LOGI("Cache miss for %s", cacheKey.c_str());
-                                    
-                                    // Read the response headers first
-                                    std::string responseHeaders;
-                                    std::string responseBody;
-                                    bool headersDone = false;
-                                    int headerBytes = 0;
-                                    std::string contentType;
-                                    std::string etag;
-                                    
-                                    while (!headersDone && (n = recv(serverSock, buffer, sizeof(buffer), 0)) > 0) {
-                                        std::string chunk(buffer, n);
-                                        responseHeaders += chunk;
-                                        
-                                        // Look for end of headers (\r\n\r\n)
-                                        size_t pos = responseHeaders.find("\r\n\r\n");
-                                        if (pos != std::string::npos) {
-                                            headersDone = true;
-                                            headerBytes = pos + 4;  // Include the \r\n\r\n
-                                            // Parse content type
-                                            std::istringstream headerStream(responseHeaders);
-                                            std::string line;
-                                            while (std::getline(headerStream, line)) {
-                                                if (line.find("Content-Type: ") == 0) {
-                                                    contentType = line.substr(14);
-                                                } else if (line.find("ETag: ") == 0) {
-                                                    etag = line.substr(6);
-                                                }
-                                            }
-                                            
-                                            // Insert our headers just before the \r\n\r\n
-                                            std::string modifiedHeaders = responseHeaders.substr(0, pos);
-                                            modifiedHeaders += "\r\nX-Cache: MISS";
-                                            modifiedHeaders += "\r\nX-Proxy-Through: TrafficServer-Android";
-                                            modifiedHeaders += "\r\nVia: 1.1 TrafficServer-Android";
-                                            modifiedHeaders += "\r\n\r\n";
-                                            
-                                            // Send modified headers
-                                            send(clientSocket, modifiedHeaders.c_str(), modifiedHeaders.length(), 0);
-                                            
-                                            // Start collecting response body
-                                            if (n > headerBytes) {
-                                                responseBody = std::string(buffer + headerBytes, n - headerBytes);
-                                                send(clientSocket, buffer + headerBytes, n - headerBytes, 0);
-                                            }
-                                        }
-                                    }
-                                    
-                                    // Collect and forward remaining response body
-                                    while ((n = recv(serverSock, buffer, sizeof(buffer), 0)) > 0) {
-                                        responseBody += std::string(buffer, n);
-                                        send(clientSocket, buffer, n, 0);
-                                    }
-                                    
-                                    // Cache the response if it's cacheable (for this demo, we cache everything)
-                                    DiskCache::CacheEntry entry;
-                                    entry.content = responseBody;
-                                    entry.contentType = contentType;
-                                    entry.timestamp = std::chrono::system_clock::now();
-                                    entry.etag = etag;
-                                    cache->put(cacheKey, entry);
-                                    
-                                    LOGI("Cached response for %s (size: %zu bytes)", 
-                                         cacheKey.c_str(), responseBody.length());
-                                }
-                            }
-
-                            close(serverSock);
-                        } else {
-                            LOGE("Failed to connect to target server");
-                        }
-                        freeaddrinfo(res);
-                    } else {
-                        LOGE("Failed to resolve host");
-                    }
-                }
-            }
-            close(clientSocket);
-        }).detach();
+        // Create a new thread for handling this client
+        std::thread(handleClientConnection, clientSocket).detach();
     }
 
     close(serverSocket);
     return nullptr;
+}
+
+// Function to handle a client connection
+static void handleClientConnection(int socket) {
+    char buffer[8192];
+    ssize_t n = recv(socket, buffer, sizeof(buffer)-1, 0);
+    if (n > 0) {
+        buffer[n] = '\0';
+        LOGI("Received request: %s", buffer);
+
+        // Parse the request line to get the target URL
+        std::string request(buffer);
+        size_t firstSpace = request.find(' ');
+        size_t secondSpace = request.find(' ', firstSpace + 1);
+        if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
+            std::string method = request.substr(0, firstSpace);
+            std::string url = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
+            LOGI("Method: %s, Target URL: %s", method.c_str(), url.c_str());
+
+            // Create a socket to connect to the target server
+            struct addrinfo hints = {}, *res;
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+
+            // Parse URL to get host and path
+            std::string host, path, port = "80";
+            bool isConnect = request.substr(0, firstSpace) == "CONNECT";
+
+            if (isConnect) {
+                // For CONNECT, URL is in the form host:port
+                size_t colonPos = url.find(':');
+                if (colonPos != std::string::npos) {
+                    host = url.substr(0, colonPos);
+                    port = url.substr(colonPos + 1);
+                } else {
+                    host = url;
+                    port = "443";
+                }
+                path = "/";
+            } else if (url.substr(0, 7) == "http://") {
+                // Extract host and path from URL
+                size_t hostStart = 7; // after "http://"
+                size_t hostEnd = url.find('/', hostStart);
+                if (hostEnd == std::string::npos) {
+                    host = url.substr(hostStart);
+                    path = "/";
+                } else {
+                    host = url.substr(hostStart, hostEnd - hostStart);
+                    path = url.substr(hostEnd);
+                }
+
+                // Check for port in host
+                size_t colonPos = host.find(':');
+                if (colonPos != std::string::npos) {
+                    port = host.substr(colonPos + 1);
+                    host = host.substr(0, colonPos);
+                }
+            } else {
+                // Invalid URL
+                LOGE("Invalid URL format");
+                close(socket);
+                return;
+            }
+
+            LOGI("Connecting to %s:%s", host.c_str(), port.c_str());
+
+            if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
+                int serverSock = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+                if (serverSock >= 0) {
+                    if (connect(serverSock, res->ai_addr, res->ai_addrlen) == 0) {
+                        if (isConnect) {
+                            // For HTTPS, just tunnel the connection
+                            const char* response = "HTTP/1.1 200 Connection established\r\n\r\n";
+                            send(socket, response, strlen(response), 0);
+
+                            fd_set readfds;
+                            while (true) {
+                                FD_ZERO(&readfds);
+                                FD_SET(socket, &readfds);
+                                FD_SET(serverSock, &readfds);
+
+                                int maxfd = std::max(socket, serverSock) + 1;
+                                if (select(maxfd, &readfds, nullptr, nullptr, nullptr) < 0) {
+                                    break;
+                                }
+
+                                if (FD_ISSET(socket, &readfds)) {
+                                    n = recv(socket, buffer, sizeof(buffer), 0);
+                                    if (n <= 0) break;
+                                    if (send(serverSock, buffer, n, 0) <= 0) break;
+                                }
+
+                                if (FD_ISSET(serverSock, &readfds)) {
+                                    n = recv(serverSock, buffer, sizeof(buffer), 0);
+                                    if (n <= 0) break;
+                                    if (send(socket, buffer, n, 0) <= 0) break;
+                                }
+                            }
+                        } else {
+                            // For HTTP, we can cache the response
+                            std::string cacheKey = host + path;
+                            auto cachedEntry = cache->get(cacheKey);
+
+                            if (cachedEntry) {
+                                // Use cached response
+                                std::string response = "HTTP/1.1 200 OK\r\n";
+                                response += "Content-Type: " + cachedEntry->contentType + "\r\n";
+                                response += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
+                                if (!cachedEntry->etag.empty()) {
+                                    response += "ETag: " + cachedEntry->etag + "\r\n";
+                                }
+                                response += "\r\n";
+                                response += cachedEntry->content;
+
+                                send(socket, response.c_str(), response.length(), 0);
+                                LOGI("Served from cache: %s", cacheKey.c_str());
+                            } else {
+                                // Forward the original request
+                                send(serverSock, buffer, n, 0);
+
+                                // Read and forward the response
+                                std::string responseData;
+                                std::string contentType;
+                                std::string etag;
+                                ssize_t contentLength = -1;
+                                bool chunked = false;
+
+                                // Read response headers
+                                while ((n = recv(serverSock, buffer, sizeof(buffer), 0)) > 0) {
+                                    responseData.append(buffer, n);
+                                    size_t headerEnd = responseData.find("\r\n\r\n");
+                                    if (headerEnd != std::string::npos) {
+                                        // Forward headers to client
+                                        send(socket, responseData.c_str(), responseData.length(), 0);
+
+                                        // Parse headers
+                                        std::istringstream headerStream(responseData.substr(0, headerEnd));
+                                        std::string line;
+                                        while (std::getline(headerStream, line) && line != "\r") {
+                                            if (line.substr(0, 14) == "Content-Length:") {
+                                                contentLength = std::stoll(line.substr(15));
+                                            } else if (line.substr(0, 13) == "Content-Type: ") {
+                                                contentType = line.substr(13);
+                                            } else if (line.substr(0, 6) == "ETag: ") {
+                                                etag = line.substr(6);
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+
+                                // Read and forward response body
+                                std::string responseBody;
+                                while ((n = recv(serverSock, buffer, sizeof(buffer), 0)) > 0) {
+                                    responseBody.append(buffer, n);
+                                    send(socket, buffer, n, 0);
+                                }
+
+                                // Cache the response
+                                DiskCache::CacheEntry entry;
+                                entry.content = responseBody;
+                                entry.contentType = contentType;
+                                entry.timestamp = std::chrono::system_clock::now();
+                                entry.etag = etag;
+                                cache->put(cacheKey, entry);
+                                LOGI("Cached response for %s (size: %zu bytes)", 
+                                     cacheKey.c_str(), responseBody.length());
+                            }
+                        }
+                    } else {
+                        LOGE("Failed to connect to target server");
+                    }
+                    close(serverSock);
+                }
+                freeaddrinfo(res);
+            } else {
+                LOGE("Failed to resolve host");
+            }
+        }
+    }
+    close(socket);
 }
 
 extern "C" {
@@ -409,65 +370,22 @@ extern "C" {
 JNIEXPORT jint JNICALL
 Java_org_apache_trafficserver_test_TrafficServerProxyService_startProxy(
         JNIEnv *env, jobject thiz, jstring configPath) {
-    LOGI("Starting proxy service...");
     if (proxyRunning) {
-        LOGI("Proxy already running");
-        return 1; // Already running
+        return 0;
     }
 
-    // Clear existing rules
-    remapRules.clear();
-
-    // Read and parse remap.config
-    const char* configPathStr = env->GetStringUTFChars(configPath, nullptr);
-    if (configPathStr) {
-        std::string configDir(configPathStr);
-        std::string remapConfigPath = configDir + "/remap.config";
-        std::ifstream remapFile(remapConfigPath);
-        std::string line;
-
-        while (std::getline(remapFile, line)) {
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#' || line[0] == ' ') continue;
-
-            std::istringstream iss(line);
-            std::string cmd, from, to;
-            if (iss >> cmd >> from >> to) {
-                if (cmd == "map") {
-                    RemapRule rule;
-                    
-                    // Parse from URL
-                    size_t fromHostStart = from.find("//") + 2;
-                    size_t fromHostEnd = from.find('/', fromHostStart);
-                    rule.fromHost = from.substr(fromHostStart, fromHostEnd - fromHostStart);
-                    rule.fromPath = fromHostEnd != std::string::npos ? from.substr(fromHostEnd) : "/";
-
-                    // Parse to URL
-                    size_t toHostStart = to.find("//") + 2;
-                    size_t toHostEnd = to.find('/', toHostStart);
-                    rule.toHost = to.substr(toHostStart, toHostEnd - toHostStart);
-                    rule.toPath = toHostEnd != std::string::npos ? to.substr(toHostEnd) : "/";
-
-                    LOGI("Added remap rule: %s%s -> %s%s",
-                         rule.fromHost.c_str(), rule.fromPath.c_str(),
-                         rule.toHost.c_str(), rule.toPath.c_str());
-
-                    remapRules.push_back(rule);
-                }
-            }
-        }
-
-        env->ReleaseStringUTFChars(configPath, configPathStr);
-    }
-
-    LOGI("Initializing proxy service...");
-    // Initialize disk cache
-    std::string cachePath = std::string(configPathStr) + "/cache";
-    cache = std::make_unique<DiskCache>(cachePath);
-    
     proxyRunning = true;
+
+    // Initialize cache
+    const char* cacheDir = env->GetStringUTFChars(configPath, nullptr);
+    if (cacheDir) {
+        cache = std::make_unique<DiskCache>(std::string(cacheDir) + "/cache");
+        env->ReleaseStringUTFChars(configPath, cacheDir);
+    }
+
+    // Start proxy thread
     proxyThread = std::thread(proxyLoop, nullptr);
-    LOGI("Proxy service started successfully");
+    proxyThread.detach();
     return 0;
 }
 
@@ -480,17 +398,15 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_stopProxy(
 
     proxyRunning = false;
     if (serverSocket >= 0) {
-        close(serverSocket); // This will cause accept() to return with an error
-    }
-    if (proxyThread.joinable()) {
-        proxyThread.join();
+        close(serverSocket);
+        serverSocket = -1;
     }
 }
 
 JNIEXPORT jboolean JNICALL
 Java_org_apache_trafficserver_test_TrafficServerProxyService_isProxyRunning(
         JNIEnv *env, jobject thiz) {
-    return proxyRunning ? JNI_TRUE : JNI_FALSE;
+    return proxyRunning;
 }
 
 }
