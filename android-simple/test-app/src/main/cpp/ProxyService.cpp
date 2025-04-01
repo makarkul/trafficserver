@@ -201,6 +201,41 @@ static void handleClientConnection(int socket) {
             std::string url = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
             LOGI("Method: %s, Target URL: %s", method.c_str(), url.c_str());
 
+            // Check if this is a cache population request
+            if (url.find("http://cache.local/populate?") == 0) {
+                // Parse target_url and content from query string
+                size_t urlPos = url.find("url=");
+                size_t contentPos = url.find("&content=");
+                if (urlPos != std::string::npos && contentPos != std::string::npos) {
+                    std::string target_url = url.substr(urlPos + 4, contentPos - (urlPos + 4));
+                    std::string content = url.substr(contentPos + 9);
+                    
+                    // Create cache entry
+                    DiskCache::CacheEntry entry;
+                    entry.content = content;
+                    entry.contentType = "text/plain";
+                    entry.timestamp = std::chrono::system_clock::now();
+                    entry.etag = "w/" + std::to_string(std::chrono::system_clock::to_time_t(entry.timestamp));
+                    
+                    // Add / to target_url if needed
+                    if (target_url.back() != '/') {
+                        target_url += "/";
+                    }
+                    
+                    // Store in cache
+                    if (cache) {
+                        cache->put(target_url, entry);
+                        std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSuccess";
+                        send(socket, response.c_str(), response.length(), 0);
+                        LOGI("Added to cache: %s", target_url.c_str());
+                        return;
+                    }
+                }
+                std::string response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 20\r\n\r\nInvalid cache request";
+                send(socket, response.c_str(), response.length(), 0);
+                return;
+            }
+
             // Create a socket to connect to the target server
             struct addrinfo hints = {}, *res;
             hints.ai_family = AF_UNSPEC;

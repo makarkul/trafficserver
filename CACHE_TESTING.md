@@ -1,8 +1,10 @@
 # Cache Testing Guide
 
-## Manual Cache Population
-
 The TrafficServer proxy supports pre-populating the cache for testing purposes. This guide explains how to manually create and test cached content.
+
+## Methods for Cache Population
+
+There are two ways to populate the cache:
 
 ### Cache File Location
 Cache files are stored in the app's private directory on the Android device:
@@ -10,7 +12,7 @@ Cache files are stored in the app's private directory on the Android device:
 /data/user/0/org.apache.trafficserver.test/app_config/cache/
 ```
 
-### Using the Cache Population Script
+### 1. Using the Cache Population Script (From Host Machine)
 1. Use `create_cache_entry.py` to generate a cache file:
 ```bash
 python3 create_cache_entry.py
@@ -32,6 +34,21 @@ adb shell "run-as org.apache.trafficserver.test cp /data/local/tmp/cache_entry /
 ```
 
 Replace `<hash>` with the filename output by the cache creation script.
+
+### 2. Using the Cache Population API (From Emulator)
+
+The proxy provides a simple HTTP API to populate the cache:
+
+```bash
+# Format:
+# http://cache.local/populate?url=<target_url>&content=<content_to_cache>
+
+# Example using netcat (from emulator):
+echo -e 'GET http://cache.local/populate?url=example.com&content=hello HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc 127.0.0.1 8888
+
+# To URL-encode more complex content:
+echo -e 'GET http://cache.local/populate?url=example.com&content=%3Chtml%3E%3Cbody%3EHello%3C%2Fbody%3E%3C%2Fhtml%3E HTTP/1.1\r\nHost: localhost\r\n\r\n' | nc 127.0.0.1 8888
+```
 
 ### Testing Cached Content
 1. Start the test app
