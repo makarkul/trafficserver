@@ -72,12 +72,11 @@ class MainActivity : AppCompatActivity() {
         }
         
         // Add test URLs
-        binding.spinnerUrls.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf(
-            "https://example.com",
+        val urls = arrayOf(
             "http://example.com",
-            "https://api.github.com/zen",
-            "http://info.cern.ch"
-        ))
+            "http://neverssl.com"
+        )
+        binding.spinnerUrls.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, urls)
     }
     
     private suspend fun checkProxyRunning(): Boolean = withContext(Dispatchers.IO) {
