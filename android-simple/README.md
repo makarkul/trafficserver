@@ -2,6 +2,24 @@
 
 A lightweight implementation of Apache TrafficServer features for Android, demonstrating core proxy server functionality, URL remapping, and caching.
 
+## Setting up HTTP Proxy
+
+To redirect all HTTP traffic from the Android emulator through the proxy:
+
+```bash
+adb shell settings put global http_proxy localhost:8888
+```
+
+This will configure the system-wide proxy settings to use TrafficServer running on port 8888. All HTTP traffic from apps (including browsers) will be directed through the proxy.
+
+To remove the proxy settings:
+
+```bash
+adb shell settings delete global http_proxy
+adb shell settings delete global global_http_proxy_host
+adb shell settings delete global global_http_proxy_port
+```
+
 ## Comparison with Apache TrafficServer
 
 ### Architecture

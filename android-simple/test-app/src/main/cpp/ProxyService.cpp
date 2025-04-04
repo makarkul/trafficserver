@@ -19,9 +19,9 @@
 #include <filesystem>
 #include <fstream>
 
-#define LOG_TAG   "ProxyService"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+#define LOG_TAG "ProxyService"
+#define LOGI(...) ((void)__android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__))
+#define LOGE(...) ((void)__android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__))
 
 struct RemapRule {
   std::string fromHost;
@@ -35,99 +35,155 @@ static int                    serverSocket = -1;
 static std::thread            proxyThread;
 static std::vector<RemapRule> remapRules;
 
-class DiskCache
-{
+class DiskCache {
 public:
-  struct CacheEntry {
-    std::string                           content;
-    std::string                           contentType;
-    std::chrono::system_clock::time_point timestamp;
-    std::string                           etag;
-  };
+    struct CacheEntry {
+        std::string content;
+        std::string contentType;
+        std::string contentEncoding;
+        std::chrono::system_clock::time_point timestamp;
+        std::string etag;
+    };
 
-  DiskCache(const std::string &cacheDir) : cacheDir_(cacheDir)
-  {
-    std::filesystem::create_directories(cacheDir);
-    LOGI("Initialized disk cache at: %s", cacheDir.c_str());
-  }
-
-  void
-  put(const std::string &key, const CacheEntry &entry)
-  {
-    LOGI("DiskCache::put called with key: %s", key.c_str());
-    std::string   path = getPath(key);
-    std::ofstream file(path, std::ios::binary);
-    if (file.is_open()) {
-      // Write timestamp
-      auto timestamp = std::chrono::system_clock::to_time_t(entry.timestamp);
-      file.write(reinterpret_cast<const char *>(&timestamp), sizeof(timestamp));
-
-      // Write content type length and content
-      size_t len = entry.contentType.length();
-      file.write(reinterpret_cast<const char *>(&len), sizeof(len));
-      file.write(entry.contentType.c_str(), len);
-
-      // Write etag length and content
-      len = entry.etag.length();
-      file.write(reinterpret_cast<const char *>(&len), sizeof(len));
-      file.write(entry.etag.c_str(), len);
-
-      // Write content length and content
-      len = entry.content.length();
-      file.write(reinterpret_cast<const char *>(&len), sizeof(len));
-      file.write(entry.content.c_str(), len);
-
-      LOGI("Cached %s (%zu bytes)", key.c_str(), entry.content.length());
+    explicit DiskCache(const std::string& cacheDir) : cacheDir_(cacheDir) {
+        std::filesystem::create_directories(cacheDir);
+        LOGI("Initialized disk cache at: %s", cacheDir.c_str());
     }
-  }
 
-  std::optional<CacheEntry>
-  get(const std::string &key)
-  {
-    std::string path = getPath(key);
-    LOGI("Looking for cache file at: %s", path.c_str());
-    std::ifstream file(path, std::ios::binary);
-    if (file.is_open()) {
-      CacheEntry entry;
+    void put(const std::string& key, const CacheEntry& entry) {
+        LOGI("DiskCache::put called with key: %s", key.c_str());
+        std::string path = getPath(key);
+        std::ofstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            try {
+                // Write timestamp
+                auto timestamp = std::chrono::system_clock::to_time_t(entry.timestamp);
+                file.write(reinterpret_cast<const char*>(&timestamp), sizeof(timestamp));
 
-      // Read timestamp
-      std::time_t timestamp;
-      file.read(reinterpret_cast<char *>(&timestamp), sizeof(timestamp));
-      entry.timestamp = std::chrono::system_clock::from_time_t(timestamp);
+                // Write content type length and content
+                size_t len = entry.contentType.length();
+                file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                file.write(entry.contentType.c_str(), len);
 
-      // Read content type
-      size_t len;
-      file.read(reinterpret_cast<char *>(&len), sizeof(len));
-      entry.contentType.resize(len);
-      file.read(&entry.contentType[0], len);
+                // Write content encoding length and content
+                len = entry.contentEncoding.length();
+                file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                file.write(entry.contentEncoding.c_str(), len);
 
-      // Read etag
-      file.read(reinterpret_cast<char *>(&len), sizeof(len));
-      entry.etag.resize(len);
-      file.read(&entry.etag[0], len);
+                // Write etag length and content
+                len = entry.etag.length();
+                file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                file.write(entry.etag.c_str(), len);
 
-      // Read content
-      file.read(reinterpret_cast<char *>(&len), sizeof(len));
-      entry.content.resize(len);
-      file.read(&entry.content[0], len);
+                // Write content length and content
+                len = entry.content.length();
+                file.write(reinterpret_cast<const char*>(&len), sizeof(len));
+                file.write(entry.content.c_str(), len);
 
-      return entry;
+                LOGI("Cached %s (%zu bytes)", key.c_str(), entry.content.length());
+            } catch (const std::exception& e) {
+                LOGE("Exception while writing cache: %s", e.what());
+            }
+        } else {
+            LOGE("Failed to open cache file for writing: %s", path.c_str());
+        }
     }
-    return std::nullopt;
-  }
+
+    std::optional<CacheEntry> get(const std::string& key) {
+        std::string path = getPath(key);
+        LOGI("Reading cache file: %s", path.c_str());
+        std::ifstream file(path, std::ios::binary);
+        if (file.is_open()) {
+            try {
+                CacheEntry entry;
+
+                // Read timestamp
+                std::time_t timestamp;
+                file.read(reinterpret_cast<char*>(&timestamp), sizeof(timestamp));
+                if (file.fail()) {
+                    LOGE("Failed to read timestamp");
+                    return std::nullopt;
+                }
+                entry.timestamp = std::chrono::system_clock::from_time_t(timestamp);
+
+                // Read content type
+                size_t len;
+                file.read(reinterpret_cast<char*>(&len), sizeof(len));
+                if (file.fail() || len > 1000000) {
+                    LOGE("Failed to read content type length or invalid length: %zu", len);
+                    return std::nullopt;
+                }
+                entry.contentType.resize(len);
+                file.read(&entry.contentType[0], len);
+                if (file.fail()) {
+                    LOGE("Failed to read content type");
+                    return std::nullopt;
+                }
+                LOGI("Read content type: %s", entry.contentType.c_str());
+
+                // Read content encoding
+                file.read(reinterpret_cast<char*>(&len), sizeof(len));
+                if (file.fail() || len > 1000000) {
+                    LOGE("Failed to read content encoding length or invalid length: %zu", len);
+                    return std::nullopt;
+                }
+                entry.contentEncoding.resize(len);
+                file.read(&entry.contentEncoding[0], len);
+                if (file.fail()) {
+                    LOGE("Failed to read content encoding");
+                    return std::nullopt;
+                }
+                LOGI("Read content encoding: %s", entry.contentEncoding.c_str());
+
+                // Read etag
+                file.read(reinterpret_cast<char*>(&len), sizeof(len));
+                if (file.fail() || len > 1000000) {
+                    LOGE("Failed to read etag length or invalid length: %zu", len);
+                    return std::nullopt;
+                }
+                entry.etag.resize(len);
+                file.read(&entry.etag[0], len);
+                if (file.fail()) {
+                    LOGE("Failed to read etag");
+                    return std::nullopt;
+                }
+                LOGI("Read etag: %s", entry.etag.c_str());
+
+                // Read content
+                file.read(reinterpret_cast<char*>(&len), sizeof(len));
+                if (file.fail() || len > 100000000) {
+                    LOGE("Failed to read content length or invalid length: %zu", len);
+                    return std::nullopt;
+                }
+                entry.content.resize(len);
+                file.read(&entry.content[0], len);
+                if (file.fail()) {
+                    LOGE("Failed to read content");
+                    return std::nullopt;
+                }
+                LOGI("Successfully read cache entry with %zu bytes of content", len);
+
+                return entry;
+            } catch (const std::exception& e) {
+                LOGE("Exception while reading cache: %s", e.what());
+                return std::nullopt;
+            }
+        } else {
+            LOGE("Failed to open cache file: %s", path.c_str());
+        }
+        return std::nullopt;
+    }
 
 private:
-  std::string
-  getPath(const std::string &key)
-  {
-    // Create a filename-safe hash of the key
-    std::hash<std::string> hasher;
-    size_t                 hash     = hasher(key);
-    std::string            filename = std::to_string(hash);
-    LOGI("Cache key: %s, Hash: %zu, Filename: %s", key.c_str(), hash, filename.c_str());
-    return cacheDir_ + "/" + filename;
-  }
-  std::string cacheDir_;
+    std::string cacheDir_;
+
+    std::string getPath(const std::string& key) const {
+        std::hash<std::string> hasher;
+        size_t hash = hasher(key);
+        std::string filename = std::to_string(hash);
+        LOGI("Cache key: %s, Hash: %zu, Filename: %s", key.c_str(), hash, filename.c_str());
+        return cacheDir_ + "/" + filename;
+    }
 };
 
 static std::unique_ptr<DiskCache> cache;
@@ -343,6 +399,9 @@ handleClientConnection(int socket)
                 std::string response  = "HTTP/1.1 200 OK\r\n";
                 response             += "Content-Type: " + cachedEntry->contentType + "\r\n";
                 response             += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
+                if (!cachedEntry->contentEncoding.empty()) {
+                  response += "Content-Encoding: " + cachedEntry->contentEncoding + "\r\n";
+                }
                 if (!cachedEntry->etag.empty()) {
                   response += "ETag: " + cachedEntry->etag + "\r\n";
                 }
@@ -361,6 +420,7 @@ handleClientConnection(int socket)
                 LOGI("About to read response from server...");
                 std::string responseData;
                 std::string contentType;
+                std::string contentEncoding;
                 std::string etag;
                 ssize_t     contentLength = -1;
                 bool        chunked       = false;
@@ -432,6 +492,9 @@ handleClientConnection(int socket)
                         } else if (lowerName == "content-type") {
                           contentType = value;
                           LOGI("Found Content-Type: %s", contentType.c_str());
+                        } else if (lowerName == "content-encoding") {
+                          contentEncoding = value;
+                          LOGI("Found Content-Encoding: %s", contentEncoding.c_str());
                         } else if (lowerName == "etag") {
                           etag = value;
                           LOGI("Found ETag: %s", etag.c_str());
@@ -475,6 +538,7 @@ handleClientConnection(int socket)
                         DiskCache::CacheEntry entry;
                         entry.content     = responseBody;
                         entry.contentType = contentType;
+                        entry.contentEncoding = contentEncoding;
                         entry.timestamp   = std::chrono::system_clock::now();
                         entry.etag        = etag;
 
