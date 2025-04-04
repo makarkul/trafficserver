@@ -264,49 +264,67 @@ handleClientConnection(int socket)
 
     // Parse the request line to get the target URL
     std::string request(buffer);
-    size_t      firstSpace  = request.find(' ');
-    size_t      secondSpace = request.find(' ', firstSpace + 1);
-    if (firstSpace != std::string::npos && secondSpace != std::string::npos) {
-      std::string method = request.substr(0, firstSpace);
-      std::string url    = request.substr(firstSpace + 1, secondSpace - firstSpace - 1);
-      LOGI("Method: %s, Target URL: %s", method.c_str(), url.c_str());
 
-      // Check if this is a cache population request
-      if (url.find("http://cache.local/populate?") == 0) {
-        // Parse target_url and content from query string
-        size_t urlPos     = url.find("url=");
-        size_t contentPos = url.find("&content=");
-        if (urlPos != std::string::npos && contentPos != std::string::npos) {
-          std::string target_url = url.substr(urlPos + 4, contentPos - (urlPos + 4));
-          std::string content    = url.substr(contentPos + 9);
+// Check if this is a cache population request
+if (method == "POST" && url == "/cache/populate") {
+// Find Content-Type header
+std::string contentType;
+size_t contentTypePos = request.find("Content-Type:");
+if (contentTypePos != std::string::npos) {
+size_t endOfLine = request.find("\r\n", contentTypePos);
+if (endOfLine != std::string::npos) {
+contentType = request.substr(contentTypePos + 13, endOfLine - (contentTypePos + 13));
+// Trim whitespace
+contentType.erase(0, contentType.find_first_not_of(" "));
+contentType.erase(contentType.find_last_not_of(" ") + 1);
+}
+}
 
-          // Create cache entry
-          DiskCache::CacheEntry entry;
-          entry.content     = content;
-          entry.contentType = "text/plain";
-          entry.timestamp   = std::chrono::system_clock::now();
-          entry.etag        = "w/" + std::to_string(std::chrono::system_clock::to_time_t(entry.timestamp));
+// Find Host header
+std::string targetHost;
+size_t hostPos = request.find("\r\nHost:");
+if (hostPos != std::string::npos) {
+size_t endOfLine = request.find("\r\n", hostPos + 7);
+if (endOfLine != std::string::npos) {
+targetHost = request.substr(hostPos + 7, endOfLine - (hostPos + 7));
+// Trim whitespace
+targetHost.erase(0, targetHost.find_first_not_of(" "));
+targetHost.erase(targetHost.find_last_not_of(" ") + 1);
+}
+}
 
-          // Add / to target_url if needed
-          if (target_url.back() != '/') {
-            target_url += "/";
-          }
+// Find Target-Path header
+std::string targetPath;
+size_t pathPos = request.find("\r\nTarget-Path:");
+if (pathPos != std::string::npos) {
+size_t endOfLine = request.find("\r\n", pathPos + 13);
+if (endOfLine != std::string::npos) {
+targetPath = request.substr(pathPos + 13, endOfLine - (pathPos + 13));
+// Trim whitespace
+targetPath.erase(0, targetPath.find_first_not_of(" "));
+targetPath.erase(targetPath.find_last_not_of(" ") + 1);
+}
+}
 
-          // Store in cache
-          if (cache) {
-            cache->put(target_url, entry);
-            std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nSuccess";
-            send(socket, response.c_str(), response.length(), 0);
-            LOGI("Added to cache: %s", target_url.c_str());
-            return;
-          }
-        }
-        std::string response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 20\r\n\r\nInvalid cache request";
-        send(socket, response.c_str(), response.length(), 0);
-        return;
-      }
+// Find Content-Length header
+ssize_t contentLength = -1;
+size_t contentLengthPos = request.find("Content-Length:");
+if (contentLengthPos != std::string::npos) {
+size_t endOfLine = request.find("\r\n", contentLengthPos);
+if (endOfLine != std::string::npos) {
+std::string lengthStr = request.substr(contentLengthPos + 15, endOfLine - (contentLengthPos + 15));
+// Trim whitespace
+lengthStr.erase(0, lengthStr.find_first_not_of(" "));
+lengthStr.erase(lengthStr.find_last_not_of(" ") + 1);
+contentLength = std::stoll(lengthStr);
+}
+}
 
-      // Create a socket to connect to the target server
+if (targetHost.empty() || targetPath.empty() || contentLength <= 0) {
+std::string response = "HTTP/1.1 400 Bad Request\r\nContent-Length: 51\r\n\r\nMissing required headers: Host, Target-Path, Content-Length";
+send(socket, response.c_str(), response.length(), 0);
+return;
+}
       struct addrinfo hints = {}, *res;
       hints.ai_family       = AF_UNSPEC;
       hints.ai_socktype     = SOCK_STREAM;
