@@ -11,31 +11,50 @@
         android:layout_height="wrap_content"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/buttonDirectRequest"
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guideline1"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.33" />
+
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/guideline2"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_percent="0.66" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonDirectRequest"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
+        android:layout_marginEnd="4dp"
         android:text="Direct Request"
+        app:layout_constraintEnd_toStartOf="@id/guideline1"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/spinnerUrls" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/buttonProxyRequest"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
+        android:layout_marginStart="4dp"
+        android:layout_marginEnd="4dp"
         android:text="Via Proxy"
-        app:layout_constraintStart_toEndOf="@id/buttonDirectRequest"
+        app:layout_constraintEnd_toStartOf="@id/guideline2"
+        app:layout_constraintStart_toStartOf="@id/guideline1"
         app:layout_constraintTop_toTopOf="@id/buttonDirectRequest" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/buttonToggleProxy"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
+        android:layout_marginStart="4dp"
         android:text="Start Proxy"
-        app:layout_constraintStart_toEndOf="@id/buttonProxyRequest"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="@id/guideline2"
         app:layout_constraintTop_toTopOf="@id/buttonDirectRequest" />
 
     <ScrollView
