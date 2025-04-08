@@ -497,6 +497,40 @@ handleClientConnection(int socket)
         close(socket);
         return;
     }
+    // For HTTP requests, check cache first before any network operations
+    if (!isConnect) {
+      std::string cacheKey = host + path;
+      LOGI("Checking cache for key: %s", cacheKey.c_str());
+      auto cachedEntry = cache->get(cacheKey);
+
+      if (cachedEntry) {
+        // Use cached response
+        std::string response = "HTTP/1.1 200 OK\r\n";
+        response += "Content-Type: " + cachedEntry->contentType + "\r\n";
+        if (!cachedEntry->contentEncoding.empty()) {
+          response += "Content-Encoding: " + cachedEntry->contentEncoding + "\r\n";
+        }
+        if (!cachedEntry->etag.empty()) {
+          response += "ETag: " + cachedEntry->etag + "\r\n";
+        }
+        response += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
+        response += "\r\n";
+        response += cachedEntry->content;
+
+        LOGI("Sending cached response headers (%zu bytes)", response.length() - cachedEntry->content.length());
+        ssize_t sent = send(socket, response.c_str(), response.length(), 0);
+        if (sent < 0) {
+          LOGE("Failed to send cached response: %s", strerror(errno));
+        } else {
+          LOGI("Successfully sent %zd bytes from cache for key: %s", sent, cacheKey.c_str());
+        }
+        close(socket);
+        LOGI("handleClientConnection: Closed socket %d after serving cached response", socket);
+        return;
+      }
+    }
+
+    // If not in cache or HTTPS, proceed with network operations
     LOGI("Connecting to %s:%s", host.c_str(), port.c_str());
 
     if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
