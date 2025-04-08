@@ -31,9 +31,12 @@ struct RemapRule {
 };
 
 static std::atomic<bool>      proxyRunning{false};
+static std::atomic<bool>      proxyReady{false};
 static int                    serverSocket = -1;
 static std::thread            proxyThread;
 static std::vector<RemapRule> remapRules;
+static std::mutex            proxyMutex;
+static std::condition_variable proxyCondVar;
 
 class DiskCache
 {
@@ -207,6 +210,9 @@ proxyLoop(void *)
   serverSocket = socket(AF_INET, SOCK_STREAM, 0);
   if (serverSocket < 0) {
     LOGE("Failed to create socket");
+    proxyRunning = false;
+    proxyReady = false;
+    proxyCondVar.notify_all();
     return nullptr;
   }
 
@@ -217,6 +223,9 @@ proxyLoop(void *)
     LOGE("Failed to set socket options");
     close(serverSocket);
     serverSocket = -1;
+    proxyRunning = false;
+    proxyReady = false;
+    proxyCondVar.notify_all();
     return nullptr;
   }
 
@@ -231,6 +240,9 @@ proxyLoop(void *)
     LOGE("Failed to bind server socket");
     close(serverSocket);
     serverSocket = -1;
+    proxyRunning = false;
+    proxyReady = false;
+    proxyCondVar.notify_all();
     return nullptr;
   }
 
@@ -239,10 +251,15 @@ proxyLoop(void *)
     LOGE("Failed to listen on server socket");
     close(serverSocket);
     serverSocket = -1;
+    proxyRunning = false;
+    proxyReady = false;
+    proxyCondVar.notify_all();
     return nullptr;
   }
 
   LOGI("Proxy server listening on port 8888");
+  proxyReady = true;
+  proxyCondVar.notify_all();
 
   while (proxyRunning) {
     struct sockaddr_in clientAddr;
@@ -735,6 +752,7 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_startProxy(JNIEnv *
   }
 
   proxyRunning = true;
+  proxyReady = false;
 
   // Initialize cache
   const char *cacheDir = env->GetStringUTFChars(configPath, nullptr);
@@ -746,7 +764,20 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_startProxy(JNIEnv *
   // Start proxy thread
   proxyThread = std::thread(proxyLoop, nullptr);
   proxyThread.detach();
-  return 0;
+
+  // Wait for proxy to be ready or fail
+  {
+    std::unique_lock<std::mutex> lock(proxyMutex);
+    if (proxyCondVar.wait_for(lock, std::chrono::seconds(5), []{ return proxyReady || !proxyRunning; })) {
+      // If we're here, either proxy is ready or it failed to start
+      return proxyReady ? 0 : -1;
+    } else {
+      // Timeout waiting for proxy to start
+      LOGE("Timeout waiting for proxy to start");
+      proxyRunning = false;
+      return -1;
+    }
+  }
 }
 
 JNIEXPORT void JNICALL
@@ -757,6 +788,7 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_stopProxy(JNIEnv *e
   }
 
   proxyRunning = false;
+  proxyReady = false;
   if (serverSocket >= 0) {
     shutdown(serverSocket, SHUT_RDWR);
     close(serverSocket);
@@ -769,7 +801,7 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_stopProxy(JNIEnv *e
 JNIEXPORT jboolean JNICALL
 Java_org_apache_trafficserver_test_TrafficServerProxyService_isProxyRunning(JNIEnv *env, jobject thiz)
 {
-  return proxyRunning;
+  return proxyRunning && proxyReady;
 }
 
 } // End of extern "C"
