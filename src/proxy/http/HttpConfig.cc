@@ -486,6 +486,7 @@ register_stat_callbacks()
   http_rsb.total_client_connections          = Metrics::Counter::createPtr("proxy.process.http.total_client_connections");
   http_rsb.total_client_connections_ipv4     = Metrics::Counter::createPtr("proxy.process.http.total_client_connections_ipv4");
   http_rsb.total_client_connections_ipv6     = Metrics::Counter::createPtr("proxy.process.http.total_client_connections_ipv6");
+  http_rsb.total_client_connections_uds      = Metrics::Counter::createPtr("proxy.process.http.total_client_connections_uds");
   http_rsb.total_incoming_connections        = Metrics::Counter::createPtr("proxy.process.http.total_incoming_connections");
   http_rsb.total_parent_marked_down_count    = Metrics::Counter::createPtr("proxy.process.http.total_parent_marked_down_count");
   http_rsb.total_parent_proxy_connections    = Metrics::Counter::createPtr("proxy.process.http.total_parent_proxy_connections");
@@ -828,6 +829,7 @@ HttpConfig::startup()
   HttpEstablishStaticConfigByte(c.oride.chunking_enabled, "proxy.config.http.chunking_enabled");
   HttpEstablishStaticConfigLongLong(c.oride.http_chunking_size, "proxy.config.http.chunking.size");
   HttpEstablishStaticConfigByte(c.oride.http_drop_chunked_trailers, "proxy.config.http.drop_chunked_trailers");
+  HttpEstablishStaticConfigByte(c.oride.http_strict_chunk_parsing, "proxy.config.http.strict_chunk_parsing");
   HttpEstablishStaticConfigByte(c.oride.flow_control_enabled, "proxy.config.http.flow_control.enabled");
   HttpEstablishStaticConfigLongLong(c.oride.flow_high_water_mark, "proxy.config.http.flow_control.high_water");
   HttpEstablishStaticConfigLongLong(c.oride.flow_low_water_mark, "proxy.config.http.flow_control.low_water");
@@ -1124,6 +1126,7 @@ HttpConfig::reconfigure()
   params->oride.keep_alive_enabled_out      = INT_TO_BOOL(m_master.oride.keep_alive_enabled_out);
   params->oride.chunking_enabled            = INT_TO_BOOL(m_master.oride.chunking_enabled);
   params->oride.http_drop_chunked_trailers  = m_master.oride.http_drop_chunked_trailers;
+  params->oride.http_strict_chunk_parsing   = m_master.oride.http_strict_chunk_parsing;
   params->oride.auth_server_session_private = m_master.oride.auth_server_session_private;
 
   params->oride.http_chunking_size = m_master.oride.http_chunking_size;

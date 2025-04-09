@@ -258,6 +258,7 @@ struct HttpStatsBlock {
   Metrics::Counter::AtomicType *total_client_connections;
   Metrics::Counter::AtomicType *total_client_connections_ipv4;
   Metrics::Counter::AtomicType *total_client_connections_ipv6;
+  Metrics::Counter::AtomicType *total_client_connections_uds;
   Metrics::Counter::AtomicType *total_incoming_connections;
   Metrics::Counter::AtomicType *total_parent_marked_down_count;
   Metrics::Counter::AtomicType *total_parent_proxy_connections;
@@ -659,6 +660,7 @@ struct OverridableHttpConfigParams {
 
   MgmtInt  http_chunking_size         = 4096; ///< Maximum chunk size for chunked output.
   MgmtByte http_drop_chunked_trailers = 1;    ///< Whether to drop chunked trailers.
+  MgmtByte http_strict_chunk_parsing  = 1;    ///< Whether to parse chunked body strictly.
   MgmtInt  flow_high_water_mark       = 0;    ///< Flow control high water mark.
   MgmtInt  flow_low_water_mark        = 0;    ///< Flow control low water mark.
 
