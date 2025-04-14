@@ -14,15 +14,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.net.DatagramPacket
-import java.net.DatagramSocket
-import java.net.InetAddress
-import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import kotlin.concurrent.thread
-import javax.net.ssl.SSLSocket
-import javax.net.ssl.SSLSocketFactory
 
 class TrafficServerVpnService : VpnService() {
     companion object {
@@ -31,98 +25,7 @@ class TrafficServerVpnService : VpnService() {
         private const val NOTIFICATION_ID = 1
         private const val PROXY_ADDRESS = "127.0.0.1"
         private const val PROXY_PORT = 8888
-
-        // IP header constants
-        private const val IP_HEADER_SIZE = 20
-        private const val PROTOCOL_TCP = 6
-        
-        // TCP header constants
-        private const val TCP_HEADER_SIZE = 20
-        private const val TCP_FLAG_SYN = 0x02
-        private const val TCP_FLAG_ACK = 0x10
-    }
-
-    // Track TCP connections
-    private data class TcpConnection(val srcPort: Int, val dstPort: Int)
-    private val tcpConnections = mutableSetOf<TcpConnection>()
-
-    private fun getIpHeaderLength(packet: ByteArray): Int {
-        return (packet[0].toInt() and 0x0F) * 4 // IHL field * 4 bytes
-    }
-
-    private fun getTcpHeaderLength(packet: ByteArray, ipHeaderLength: Int): Int {
-        // Data offset field is top 4 bits, multiply by 4 to get bytes
-        return ((packet[ipHeaderLength + 12].toInt() and 0xF0) shr 4) * 4
-    }
-
-    private fun extractHttpRequest(packet: ByteArray, length: Int): ByteArray? {
-        if (length < IP_HEADER_SIZE + TCP_HEADER_SIZE) {
-            Log.d(TAG, "Packet too small for IP+TCP headers")
-            return null
-        }
-
-        // Check if it's a TCP packet
-        val protocol = packet[9].toInt() and 0xFF
-        if (protocol != PROTOCOL_TCP) {
-            Log.d(TAG, "Not a TCP packet (protocol=$protocol)")
-            return null
-        }
-
-        // Get source and destination ports
-        val srcPort = ((packet[20].toInt() and 0xFF) shl 8) or (packet[21].toInt() and 0xFF)
-        val dstPort = ((packet[22].toInt() and 0xFF) shl 8) or (packet[23].toInt() and 0xFF)
-        val tcpFlags = packet[33].toInt() and 0xFF
-
-        // Handle TCP connection establishment
-        val connection = TcpConnection(srcPort, dstPort)
-        if ((tcpFlags and TCP_FLAG_SYN) != 0) {
-            if ((tcpFlags and TCP_FLAG_ACK) == 0) {
-                // SYN packet - new connection
-                Log.d(TAG, "New TCP connection: $srcPort -> $dstPort")
-                tcpConnections.add(connection)
-            }
-            return null // Skip SYN packets
-        }
-
-        val ipHeaderLength = getIpHeaderLength(packet)
-        if (ipHeaderLength < IP_HEADER_SIZE) {
-            Log.d(TAG, "Invalid IP header length: $ipHeaderLength")
-            return null
-        }
-
-        val tcpHeaderLength = getTcpHeaderLength(packet, ipHeaderLength)
-        if (tcpHeaderLength < TCP_HEADER_SIZE) {
-            Log.d(TAG, "Invalid TCP header length: $tcpHeaderLength")
-            return null
-        }
-
-        val totalHeaderLength = ipHeaderLength + tcpHeaderLength
-        if (length <= totalHeaderLength) {
-            Log.d(TAG, "No payload data in packet")
-            return null
-        }
-
-        // Extract HTTP payload
-        val payloadLength = length - totalHeaderLength
-        val payload = ByteArray(payloadLength)
-        System.arraycopy(packet, totalHeaderLength, payload, 0, payloadLength)
-
-        // Check if it looks like an HTTP request
-        val payloadStr = String(payload, 0, minOf(8, payloadLength))
-        if (!payloadStr.startsWith("GET ") && 
-            !payloadStr.startsWith("POST ") && 
-            !payloadStr.startsWith("HEAD ") && 
-            !payloadStr.startsWith("PUT ") && 
-            !payloadStr.startsWith("DELETE ") && 
-            !payloadStr.startsWith("CONNECT ") && 
-            !payloadStr.startsWith("OPTIONS ") && 
-            !payloadStr.startsWith("TRACE ")) {
-            Log.d(TAG, "Not an HTTP request: $payloadStr")
-            return null
-        }
-
-        Log.i(TAG, "Found HTTP request: ${payloadStr.substringBefore('\n')}")
-        return payload
+        private const val BUFFER_SIZE = 32767
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -141,11 +44,7 @@ class TrafficServerVpnService : VpnService() {
     private val binder = LocalBinder()
 
 
-    private data class IPHeader(
-        val headerLength: Int,
-        val protocol: Int,
-        val destPort: Int
-    )
+
 
     inner class LocalBinder : Binder() {
         val service: TrafficServerVpnService
@@ -252,28 +151,17 @@ class TrafficServerVpnService : VpnService() {
 
     private fun startVpn() {
         isRunning = true
-        Log.i(TAG, "Starting VPN tunnel")
-        
+        val vpnInput = FileInputStream(vpnInterface?.fileDescriptor)
+        val vpnOutput = FileOutputStream(vpnInterface?.fileDescriptor)
+        val packet = ByteBuffer.allocate(BUFFER_SIZE)
+
         try {
-            val vpnInput = FileInputStream(vpnInterface?.fileDescriptor)
-            val vpnOutput = FileOutputStream(vpnInterface?.fileDescriptor)
-            val packet = ByteBuffer.allocate(32767)
-            
             while (isRunning) {
-                // Clear the packet buffer
                 packet.clear()
                 
                 // Read incoming packet from VPN interface
                 val length = vpnInput.read(packet.array())
                 if (length <= 0) continue
-                
-                // Log packet details
-                if (length >= 24) { // Minimum size for TCP/UDP header
-                    val protocol = packet[9].toInt() and 0xFF
-                    val srcPort = ((packet[20].toInt() and 0xFF) shl 8) or (packet[21].toInt() and 0xFF)
-                    val destPort = ((packet[22].toInt() and 0xFF) shl 8) or (packet[23].toInt() and 0xFF)
-                    Log.d(TAG, "Received packet: protocol=$protocol, srcPort=$srcPort, destPort=$destPort")
-                }
                 
                 Log.d(TAG, "Read $length bytes from VPN interface")
                 
@@ -281,26 +169,17 @@ class TrafficServerVpnService : VpnService() {
                 val proxySocket = Socket(PROXY_ADDRESS, PROXY_PORT)
                 protect(proxySocket) // Prevent VPN from capturing proxy traffic
                 
-                // Extract HTTP request from packet
-                val httpRequest = extractHttpRequest(packet.array(), length)
-                if (httpRequest == null) {
-                    Log.d(TAG, "Packet is not an HTTP request, skipping")
-                    proxySocket.close()
-                    continue
-                }
-
-                Log.i(TAG, "Forwarding HTTP request to proxy, length: ${httpRequest.size}")
-                proxySocket.getOutputStream().write(httpRequest)
+                // Forward the entire packet to proxy
+                proxySocket.getOutputStream().write(packet.array(), 0, length)
                 proxySocket.getOutputStream().flush()
                 
                 // Read response from proxy
-                val response = ByteArray(32767)
+                val response = ByteArray(BUFFER_SIZE)
                 val responseLength = proxySocket.getInputStream().read(response)
                 
                 if (responseLength > 0) {
                     // Write response back to VPN
                     vpnOutput.write(response, 0, responseLength)
-                    Log.d(TAG, "Wrote $responseLength bytes back to VPN")
                 }
                 
                 proxySocket.close()
@@ -310,41 +189,7 @@ class TrafficServerVpnService : VpnService() {
             cleanup()
         }
     }
-    private fun parseIPHeader(packet: ByteArray, length: Int): IPHeader {
-        val version = (packet[0].toInt() and 0xF0) shr 4
-        Log.d(TAG, "IP version: $version")
-        if (length < 20) return IPHeader(20, 0, 0) // Invalid packet
-        
-        val headerLength = (packet[0].toInt() and 0xF) * 4
-        val protocol = packet[9].toInt() and 0xFF
-        
-        var destPort = 0
-        if (length >= headerLength + 2) {
-            destPort = ((packet[headerLength + 2].toInt() and 0xFF) shl 8) or
-                      (packet[headerLength + 3].toInt() and 0xFF)
-        }
-        
-        return IPHeader(headerLength, protocol, destPort)
-    }
-    
-    private fun swapAddresses(packet: ByteArray) {
-        // Swap source and destination IP addresses
-        for (i in 0..3) {
-            val temp = packet[12 + i]
-            packet[12 + i] = packet[16 + i]
-            packet[16 + i] = temp
-        }
-        
-        // Swap source and destination ports if TCP/UDP
-        if (packet[9].toInt() == 6 || packet[9].toInt() == 17) { // TCP or UDP
-            val headerLength = (packet[0].toInt() and 0xF) * 4
-            for (i in 0..1) {
-                val temp = packet[headerLength + i]
-                packet[headerLength + i] = packet[headerLength + 2 + i]
-                packet[headerLength + 2 + i] = temp
-            }
-        }
-    }
+
 
     private fun cleanup() {
         isRunning = false
