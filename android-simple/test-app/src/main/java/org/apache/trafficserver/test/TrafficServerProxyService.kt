@@ -23,6 +23,7 @@ class TrafficServerProxyService : Service() {
     private external fun startProxy(configPath: String): Int
     private external fun stopProxy()
     private external fun isProxyRunning(): Boolean
+    private external fun getProxyFileDescriptor(): Int
 
     override fun onCreate() {
         super.onCreate()
@@ -38,6 +39,15 @@ class TrafficServerProxyService : Service() {
         android.util.Log.i("ProxyService", "Using config path: $configPath")
         val result = startProxy(configPath)
         android.util.Log.i("ProxyService", "Proxy start result: $result")
+
+        // Get the proxy socket file descriptor for VPN protection
+        val fd = getProxyFileDescriptor()
+        android.util.Log.i("ProxyService", "Proxy socket file descriptor: $fd")
+        
+        // Send broadcast to VPN service to protect this socket
+        val protectIntent = Intent("org.apache.trafficserver.PROTECT_SOCKET")
+        protectIntent.putExtra("socket_fd", fd)
+        sendBroadcast(protectIntent)
 
         return START_STICKY
     }

@@ -742,234 +742,308 @@ handleClientConnection(int socket)
     // If not in cache or HTTPS, proceed with network operations
     LOGI("Connecting to %s:%s", host.c_str(), port.c_str());
 
-    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &res) == 0) {
-      int serverSock = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    int serverSock = -1;
+    struct in_addr addr;
+
+    if (inet_pton(AF_INET, host.c_str(), &addr) == 1) {
+      LOGI("Attempting direct IP connection to %s:%s", host.c_str(), port.c_str());
+      // Direct IP connection
+      struct sockaddr_in serverAddr;
+      serverAddr.sin_family = AF_INET;
+      serverAddr.sin_port = htons(std::stoi(port));
+      serverAddr.sin_addr = addr;
+
+      serverSock = ::socket(AF_INET, SOCK_STREAM, 0);
       if (serverSock >= 0) {
-        if (connect(serverSock, res->ai_addr, res->ai_addrlen) == 0) {
-          if (isConnect) {
-            // For HTTPS, just tunnel the connection
-            const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
-            send(socket, response, strlen(response), 0);
+        LOGI("Socket created successfully, attempting to connect...");
+        if (connect(serverSock, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+          LOGE("Direct IP connection failed: %s (errno: %d)", strerror(errno), errno);
+          close(serverSock);
+          serverSock = -1;
+        } else {
+          LOGI("Direct IP connection successful");
+        }
+      } else {
+        LOGE("Failed to create socket for direct IP connection: %s (errno: %d)", strerror(errno), errno);
+      }
+    } else {
+      LOGI("Not an IP address, attempting DNS resolution for %s", host.c_str());
+      int dns_result = getaddrinfo(host.c_str(), port.c_str(), &hints, &res);
+      if (dns_result == 0) {
+        LOGI("DNS resolution successful");
+        serverSock = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        if (serverSock >= 0) {
+          LOGI("Socket created successfully, attempting to connect...");
+          if (connect(serverSock, res->ai_addr, res->ai_addrlen) < 0) {
+            LOGE("DNS connection failed: %s (errno: %d)", strerror(errno), errno);
+            close(serverSock);
+            serverSock = -1;
+          } else {
+            LOGI("DNS connection successful");
+          }
+        } else {
+          LOGE("Failed to create socket for DNS connection: %s (errno: %d)", strerror(errno), errno);
+        }
+        freeaddrinfo(res);
+      } else {
+        LOGE("DNS resolution failed: %s (error: %d)", gai_strerror(dns_result), dns_result);
+      }
+    }
 
-            fd_set            readfds;
-            struct timeval    tv;
-            std::vector<char> buffer(8192);
-            ssize_t           n;
-            while (true) {
-              FD_ZERO(&readfds);
-              FD_SET(socket, &readfds);
-              FD_SET(serverSock, &readfds);
-              tv.tv_sec  = 1;
-              tv.tv_usec = 0;
+    if (serverSock >= 0) {
+      if (isConnect) {
+        // For HTTPS, just tunnel the connection
+        const char *response = "HTTP/1.1 200 Connection established\r\n\r\n";
+        send(socket, response, strlen(response), 0);
 
-              int maxfd = std::max(socket, serverSock) + 1;
-              int ready = select(maxfd, &readfds, nullptr, nullptr, &tv);
-              if (ready < 0)
-                break;
+        fd_set            readfds;
+        struct timeval    tv;
+        std::vector<char> buffer(8192);
+        ssize_t           n;
+        while (true) {
+          FD_ZERO(&readfds);
+          FD_SET(socket, &readfds);
+          FD_SET(serverSock, &readfds);
+          tv.tv_sec  = 1;
+          tv.tv_usec = 0;
 
-              if (FD_ISSET(socket, &readfds)) {
-                ssize_t n = recv(socket, buffer.data(), buffer.size() - 1, 0);
-                if (n <= 0)
-                  break;
-                if (send(serverSock, buffer.data(), n, 0) <= 0)
-                  break;
-              }
+          int maxfd = std::max(socket, serverSock) + 1;
+          int ready = select(maxfd, &readfds, nullptr, nullptr, &tv);
+          if (ready < 0)
+            break;
 
-              if (FD_ISSET(serverSock, &readfds)) {
-                n = recv(serverSock, buffer.data(), buffer.size() - 1, 0);
-                if (n <= 0)
-                  break;
-                if (send(socket, buffer.data(), n, 0) <= 0)
-                  break;
+          if (FD_ISSET(socket, &readfds)) {
+            ssize_t n = recv(socket, buffer.data(), buffer.size() - 1, 0);
+            if (n <= 0)
+              break;
+            if (send(serverSock, buffer.data(), n, 0) <= 0)
+              break;
+          }
+
+          if (FD_ISSET(serverSock, &readfds)) {
+            n = recv(serverSock, buffer.data(), buffer.size() - 1, 0);
+            if (n <= 0)
+              break;
+            if (send(socket, buffer.data(), n, 0) <= 0)
+              break;
+          }
+        }
+      } else {
+        // For HTTP, we can cache the response
+        std::string cacheKey    = host + path;
+        auto        cachedEntry = cache->get(cacheKey);
+
+        if (cachedEntry) {
+          // Use cached response
+          std::string response  = "HTTP/1.1 200 OK\r\n";
+          response             += "Content-Type: " + cachedEntry->contentType + "\r\n";
+          response             += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
+          if (!cachedEntry->contentEncoding.empty()) {
+            response += "Content-Encoding: " + cachedEntry->contentEncoding + "\r\n";
+          }
+          if (!cachedEntry->etag.empty()) {
+            response += "ETag: " + cachedEntry->etag + "\r\n";
+          }
+          response += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
+          response += "\r\n";
+          response += cachedEntry->content;
+
+          LOGI("Sending cached response headers (%zu bytes)", response.length() - cachedEntry->content.length());
+          ssize_t sent = send(socket, response.c_str(), response.length(), 0);
+          if (sent < 0) {
+            LOGE("Failed to send cached response: %s", strerror(errno));
+          } else {
+            LOGI("Successfully sent %zd bytes from cache for key: %s", sent, cacheKey.c_str());
+          }
+          close(socket);
+          LOGI("handleClientConnection: Closing socket %d after serving cached response", socket);
+          return;
+        } else {
+          // Modify and forward the request
+          LOGI("Processing HTTP request - Method: %s, Host: %s, Path: %s", method.c_str(), host.c_str(), path.c_str());
+          std::string modifiedRequest = request;
+          if (method != "CONNECT") {
+            LOGI("Original request line: %.*s", (int)request.find("\r\n"), request.c_str());
+            // Find the first line end
+            size_t firstLineEnd = modifiedRequest.find("\r\n");
+            if (firstLineEnd != std::string::npos) {
+              // Extract the first line
+              std::string firstLine = modifiedRequest.substr(0, firstLineEnd);
+              // Replace the absolute URL with just the path
+              size_t urlStart = firstLine.find(" ") + 1;
+              size_t urlEnd = firstLine.find(" ", urlStart);
+              if (urlStart != std::string::npos && urlEnd != std::string::npos) {
+                std::string newFirstLine = method + " " + path + " HTTP/1.1";
+                modifiedRequest.replace(0, firstLineEnd, newFirstLine);
+                LOGI("Modified request line from [%s] to [%s]", firstLine.c_str(), newFirstLine.c_str());
+                LOGI("Full modified request:\n%s", modifiedRequest.c_str());
               }
             }
-          } else {
-            // For HTTP, we can cache the response
-            std::string cacheKey    = host + path;
-            auto        cachedEntry = cache->get(cacheKey);
+          }
+          LOGI("Forwarding request to server: %.*s", (int)modifiedRequest.size(), modifiedRequest.c_str());
+          send(serverSock, modifiedRequest.c_str(), modifiedRequest.size(), 0);
 
-            if (cachedEntry) {
-              // Use cached response
-              std::string response  = "HTTP/1.1 200 OK\r\n";
-              response             += "Content-Type: " + cachedEntry->contentType + "\r\n";
-              response             += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
-              if (!cachedEntry->contentEncoding.empty()) {
-                response += "Content-Encoding: " + cachedEntry->contentEncoding + "\r\n";
-              }
-              if (!cachedEntry->etag.empty()) {
-                response += "ETag: " + cachedEntry->etag + "\r\n";
-              }
-              response += "Content-Length: " + std::to_string(cachedEntry->content.length()) + "\r\n";
-              response += "\r\n";
-              response += cachedEntry->content;
+          // Read and forward the response
+          LOGI("=== Starting response handling ===");
+          LOGI("About to read response from server...");
+          std::string responseData;
+          std::string contentType;
+          std::string contentEncoding;
+          std::string etag;
+          ssize_t     contentLength = -1;
+          bool        chunked       = false;
+          LOGI("Variables initialized, starting read loop...");
 
-              LOGI("Sending cached response headers (%zu bytes)", response.length() - cachedEntry->content.length());
-              ssize_t sent = send(socket, response.c_str(), response.length(), 0);
-              if (sent < 0) {
-                LOGE("Failed to send cached response: %s", strerror(errno));
-              } else {
-                LOGI("Successfully sent %zd bytes from cache for key: %s", sent, cacheKey.c_str());
-              }
-              close(socket);
-              LOGI("handleClientConnection: Closing socket %d after serving cached response", socket);
-              return;
-            } else {
-              // Forward the original request
-              LOGI("Forwarding request to server: %.*s", (int)buffer.size(), buffer.data());
-              send(serverSock, buffer.data(), buffer.size(), 0);
+          // Read response headers
+          LOGI("Reading response headers...");
+          LOGI("Starting to read response from server...");
+          ssize_t n;
+          while ((n = recv(serverSock, buffer.data(), buffer.size() - 1, 0)) > 0) {
+            LOGI("Received %zd bytes from server", n);
+            LOGI("Raw received data: [%.*s]", (int)n, buffer.data());
+            responseData.append(buffer.data(), n);
+            size_t headerEnd = responseData.find("\r\n\r\n");
+            LOGI("Current response data length: %zu", responseData.length());
+            if (headerEnd != std::string::npos) {
+              // Log the full response data we have so far
+              LOGI("Total response data received: %zu bytes", responseData.length());
+              LOGI("Headers end at position: %zu", headerEnd);
+              LOGI("Data after headers: %zu bytes", responseData.length() - (headerEnd + 4));
+              LOGI("Raw headers:\n%s", responseData.substr(0, headerEnd).c_str());
 
-              // Read and forward the response
-              LOGI("=== Starting response handling ===");
-              LOGI("About to read response from server...");
-              std::string responseData;
-              std::string contentType;
-              std::string contentEncoding;
-              std::string etag;
-              ssize_t     contentLength = -1;
-              bool        chunked       = false;
-              LOGI("Variables initialized, starting read loop...");
+              // Forward headers to client
+              send(socket, responseData.c_str(), responseData.length(), 0);
 
-              // Read response headers
-              LOGI("Reading response headers...");
-              LOGI("Starting to read response from server...");
-              ssize_t n;
-              while ((n = recv(serverSock, buffer.data(), buffer.size() - 1, 0)) > 0) {
-                LOGI("Received %zd bytes from server", n);
-                LOGI("Raw received data: [%.*s]", (int)n, buffer.data());
-                responseData.append(buffer.data(), n);
-                size_t headerEnd = responseData.find("\r\n\r\n");
-                LOGI("Current response data length: %zu", responseData.length());
-                if (headerEnd != std::string::npos) {
-                  // Log the full response data we have so far
-                  LOGI("Total response data received: %zu bytes", responseData.length());
-                  LOGI("Headers end at position: %zu", headerEnd);
-                  LOGI("Data after headers: %zu bytes", responseData.length() - (headerEnd + 4));
-                  LOGI("Raw headers:\n%s", responseData.substr(0, headerEnd).c_str());
+              // Parse headers
+              LOGI("=== START OF RESPONSE HEADERS ===");
+              std::istringstream headerStream(responseData.substr(0, headerEnd));
+              std::string        line;
+              int                headerCount = 0;
+              bool               isFirstLine = true;
+              while (std::getline(headerStream, line)) {
+                // Remove \r if present at the end
+                if (!line.empty() && line.back() == '\r') {
+                  line.pop_back();
+                }
 
-                  // Forward headers to client
-                  send(socket, responseData.c_str(), responseData.length(), 0);
+                if (isFirstLine) {
+                  LOGI("Status line: '%s'", line.c_str());
+                  isFirstLine = false;
+                  continue;
+                }
 
-                  // Parse headers
-                  LOGI("=== START OF RESPONSE HEADERS ===");
-                  std::istringstream headerStream(responseData.substr(0, headerEnd));
-                  std::string        line;
-                  int                headerCount = 0;
-                  bool               isFirstLine = true;
-                  while (std::getline(headerStream, line)) {
-                    // Remove \r if present at the end
-                    if (!line.empty() && line.back() == '\r') {
-                      line.pop_back();
-                    }
+                if (line.empty()) {
+                  LOGI("Found empty line (end of headers)");
+                  continue;
+                }
 
-                    if (isFirstLine) {
-                      LOGI("Status line: '%s'", line.c_str());
-                      isFirstLine = false;
-                      continue;
-                    }
+                // Log every header exactly as received
+                headerCount++;
+                LOGI("Raw header[%d]: '%s'", headerCount, line.c_str());
 
-                    if (line.empty()) {
-                      LOGI("Found empty line (end of headers)");
-                      continue;
-                    }
-
-                    // Log every header exactly as received
-                    headerCount++;
-                    LOGI("Raw header[%d]: '%s'", headerCount, line.c_str());
-
-                    // Try to parse header name and value
-                    size_t colonPos = line.find(':');
-                    if (colonPos != std::string::npos) {
-                      std::string name  = line.substr(0, colonPos);
-                      std::string value = line.substr(colonPos + 1);
-                      // Trim value
-                      value.erase(0, value.find_first_not_of(" "));
-                      value.erase(value.find_last_not_of(" ") + 1);
-                      LOGI("Parsed header - Name: '%s', Value: '%s'", name.c_str(), value.c_str());
-
-                      // Convert header name to lowercase for comparison
-                      std::string lowerName = name;
-                      std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
-
-                      if (lowerName == "content-length") {
-                        contentLength = std::stoll(value);
-                        LOGI("Parsed Content-Length: %zd", contentLength);
-                      } else if (lowerName == "content-type") {
-                        contentType = value;
-                        LOGI("Found Content-Type: %s", contentType.c_str());
-                      } else if (lowerName == "content-encoding") {
-                        contentEncoding = value;
-                        LOGI("Found Content-Encoding: %s", contentEncoding.c_str());
-                      } else if (lowerName == "etag") {
-                        etag = value;
-                        LOGI("Found ETag: %s", etag.c_str());
-                      }
-                    }
-
-                    // Start reading response body
-                    LOGI("Headers parsed, starting to read response body...");
-                    std::string responseBody;
-
-                    // First, get any data after headers from the initial read
-                    if (headerEnd + 4 < responseData.length()) {
-                      responseBody = responseData.substr(headerEnd + 4);
-                      LOGI("Got %zu bytes of body data from header buffer", responseBody.length());
-                    }
-
-                    // Continue reading until we have all the data
-                    while (contentLength > 0 && responseBody.length() < contentLength) {
-                      ssize_t n = recv(serverSock, buffer.data(), buffer.size() - 1, 0);
-                      if (n <= 0) {
-                        if (n < 0) {
-                          LOGE("Error reading response body: %s", strerror(errno));
-                        }
-                        break;
-                      }
-                      LOGI("Read %zd more bytes of body data", n);
-                      responseBody.append(buffer.data(), n);
-                      LOGI("Total body size now: %zu/%zd bytes", responseBody.length(), contentLength);
-
-                      // Forward this chunk to client
-                      send(socket, buffer.data(), n, 0);
-                    }
-
-                    LOGI("Finished reading response body. Total size: %zu bytes", responseBody.length());
-
-                    // Cache the response if we got everything successfully
-                    if (contentLength > 0 && responseBody.length() == contentLength) {
-                      LOGI("Caching response - Content-Type: %s, ETag: %s, Size: %zu", contentType.c_str(), etag.c_str(),
-                           responseBody.length());
-
-                      DiskCache::CacheEntry entry;
-                      entry.content         = responseBody;
-                      entry.contentType     = contentType;
-                      entry.contentEncoding = contentEncoding;
-                      entry.timestamp       = std::chrono::system_clock::now();
-                      entry.etag            = etag;
-
-                      if (cache) {
-                        LOGI("About to cache response for key: %s", cacheKey.c_str());
-                        cache->put(cacheKey, entry);
-                        LOGI("Successfully cached response for key: %s", cacheKey.c_str());
-                      } else {
-                        LOGE("Cache object is null!");
-                      }
+                // Try to parse header name and value
+                size_t colonPos = line.find(':');
+                if (colonPos != std::string::npos) {
+                  std::string name  = line.substr(0, colonPos);
+                  std::string value = line.substr(colonPos + 1);
+                  // Trim value
+                  value.erase(0, value.find_first_not_of(" "));
+                  value.erase(value.find_last_not_of(" ") + 1);
+                  
+                  // Handle Location header for relative URLs
+                  if (name == "Location" && !value.empty() && 
+                      value[0] != '/' && value.find("://") == std::string::npos) {
+                    // Always make relative URLs absolute by prepending with host:port
+                    // but first check if the value is already at the end of our current path
+                    if (path.length() > 1 && path.substr(1) == value) {
+                        // We're already at this path (e.g. path="/web/" and value="web/")
+                        value = "http://" + host + ":" + port + path;
                     } else {
-                      LOGE("Not caching response - expected %zd bytes but got %zu", contentLength, responseBody.length());
+                        value = "http://" + host + ":" + port + "/" + value;
                     }
+                    LOGI("Transformed Location header to: %s", value.c_str());
                   }
+                  LOGI("Parsed header - Name: '%s', Value: '%s'", name.c_str(), value.c_str());
+
+                  // Convert header name to lowercase for comparison
+                  std::string lowerName = name;
+                  std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
+
+                  if (lowerName == "content-length") {
+                    contentLength = std::stoll(value);
+                    LOGI("Parsed Content-Length: %zd", contentLength);
+                  } else if (lowerName == "content-type") {
+                    contentType = value;
+                    LOGI("Found Content-Type: %s", contentType.c_str());
+                  } else if (lowerName == "content-encoding") {
+                    contentEncoding = value;
+                    LOGI("Found Content-Encoding: %s", contentEncoding.c_str());
+                  } else if (lowerName == "etag") {
+                    etag = value;
+                    LOGI("Found ETag: %s", etag.c_str());
+                  }
+                }
+
+                // Start reading response body
+                LOGI("Headers parsed, starting to read response body...");
+                std::string responseBody;
+
+                // First, get any data after headers from the initial read
+                if (headerEnd + 4 < responseData.length()) {
+                  responseBody = responseData.substr(headerEnd + 4);
+                  LOGI("Got %zu bytes of body data from header buffer", responseBody.length());
+                }
+
+                // Continue reading until we have all the data
+                while (contentLength > 0 && responseBody.length() < contentLength) {
+                  ssize_t n = recv(serverSock, buffer.data(), buffer.size() - 1, 0);
+                  if (n <= 0) {
+                    if (n < 0) {
+                      LOGE("Error reading response body: %s", strerror(errno));
+                    }
+                    break;
+                  }
+                  LOGI("Read %zd more bytes of body data", n);
+                  responseBody.append(buffer.data(), n);
+                  LOGI("Total body size now: %zu/%zd bytes", responseBody.length(), contentLength);
+
+                  // Forward this chunk to client
+                  send(socket, buffer.data(), n, 0);
+                }
+
+                LOGI("Finished reading response body. Total size: %zu bytes", responseBody.length());
+
+                // Cache the response if we got everything successfully
+                if (contentLength > 0 && responseBody.length() == contentLength) {
+                  LOGI("Caching response - Content-Type: %s, ETag: %s, Size: %zu", contentType.c_str(), etag.c_str(),
+                       responseBody.length());
+
+                  DiskCache::CacheEntry entry;
+                  entry.content         = responseBody;
+                  entry.contentType     = contentType;
+                  entry.contentEncoding = contentEncoding;
+                  entry.timestamp       = std::chrono::system_clock::now();
+                  entry.etag            = etag;
+
+                  if (cache) {
+                    LOGI("About to cache response for key: %s", cacheKey.c_str());
+                    cache->put(cacheKey, entry);
+                    LOGI("Successfully cached response for key: %s", cacheKey.c_str());
+                  } else {
+                    LOGE("Cache object is null!");
+                  }
+                } else {
+                  LOGE("Not caching response - expected %zd bytes but got %zu", contentLength, responseBody.length());
                 }
               }
             }
           }
-        } else {
-          LOGE("Failed to connect to target server");
-        } // End of if (connect)
-        close(serverSock);
-      } // End of if (serverSock >= 0)
-      freeaddrinfo(res);
+        }
+      }
+      close(serverSock);
     } else {
-      LOGE("Failed to resolve host");
-    }
+      LOGE("Failed to connect to target server");
+    } // End of if (connect)
     close(socket);
   } catch (const std::exception &e) {
     LOGE("Exception in handleClientConnection: %s", e.what());
@@ -1042,9 +1116,16 @@ Java_org_apache_trafficserver_test_TrafficServerProxyService_stopProxy(JNIEnv *e
 }
 
 JNIEXPORT jboolean JNICALL
-Java_org_apache_trafficserver_test_TrafficServerProxyService_isProxyRunning(JNIEnv *env, jobject thiz)
-{
-  return proxyRunning && proxyReady;
+Java_org_apache_trafficserver_test_TrafficServerProxyService_isProxyRunning(JNIEnv *env, jobject /* this */) {
+    return proxyRunning && proxyReady;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_apache_trafficserver_test_TrafficServerProxyService_getProxyFileDescriptor(JNIEnv *env, jobject /* this */) {
+    if (!proxyRunning || serverSocket == -1) {
+        return -1;
+    }
+    return serverSocket;
 }
 
 } // End of extern "C"

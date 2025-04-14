@@ -1,10 +1,20 @@
 package org.apache.trafficserver.test
 
+import android.Manifest
+import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.content.pm.PackageManager
+import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
 import android.widget.ArrayAdapter
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import java.net.Socket
 import kotlinx.coroutines.Dispatchers
@@ -26,39 +36,137 @@ import java.security.cert.X509Certificate
 import java.io.IOException
 
 class MainActivity : AppCompatActivity() {
+    private var vpnService: TrafficServerVpnService? = null
+
+    private val vpnServiceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? TrafficServerVpnService.LocalBinder
+            vpnService = binder?.service
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            vpnService = null
+        }
+    }
     companion object {
         private const val TAG = "ProxyTest"
     }
 
     private lateinit var binding: ActivityMainBinding
     private var proxyServiceIntent: Intent? = null
+    private var vpnServiceIntent: Intent? = null
+    private val VPN_REQUEST_CODE = 1
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted: Boolean ->
+        if (isGranted) {
+            // Permission granted, start VPN
+            val vpnIntent = VpnService.prepare(this)
+            if (vpnIntent != null) {
+                startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
+            } else {
+                onVpnPermissionGranted()
+            }
+        } else {
+            binding.textResult.text = "Notification permission denied"
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         
-        // Create proxy service intent
+        // Create service intents
         proxyServiceIntent = Intent(this, TrafficServerProxyService::class.java)
+        vpnServiceIntent = Intent(this, TrafficServerVpnService::class.java)
         
         setupUI()
-        
-        // Start proxy service on app start
+
+        // Request notification permission for Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            when {
+                ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED -> {
+                    // Permission already granted, start VPN
+                    val vpnIntent = VpnService.prepare(this)
+                    if (vpnIntent != null) {
+                        startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
+                    } else {
+                        onVpnPermissionGranted()
+                    }
+                }
+                else -> {
+                    // Request notification permission
+                    requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            }
+        } else {
+            // Below Android 13, no runtime permission needed
+            val vpnIntent = VpnService.prepare(this)
+            if (vpnIntent != null) {
+                startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
+            } else {
+                onVpnPermissionGranted()
+            }
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == VPN_REQUEST_CODE && resultCode == RESULT_OK) {
+            onVpnPermissionGranted()
+        } else {
+            binding.textResult.text = "VPN permission denied"
+        }
+    }
+
+    private fun onVpnPermissionGranted() {
         lifecycleScope.launch {
             try {
+                binding.textResult.text = "Starting services..."
+
+                // Start proxy service first
+                android.util.Log.i(TAG, "Starting proxy service")
                 startForegroundService(proxyServiceIntent!!)
-                // Wait for proxy to initialize
-                delay(1000)
+                delay(1000) // Wait for proxy to initialize
+
+                // Bind to VPN service
+                bindService(
+                    Intent(this@MainActivity, TrafficServerVpnService::class.java),
+                    vpnServiceConnection,
+                    Context.BIND_AUTO_CREATE
+                )
+
+                // Make sure proxy is running before starting VPN
+                if (!checkProxyRunning()) {
+                    binding.textResult.text = "Failed to start proxy service"
+                    android.util.Log.e(TAG, "Failed to verify proxy service")
+                    return@launch
+                }
+
+                // Start VPN service after proxy is confirmed running
+                vpnServiceIntent?.let { intent ->
+                    android.util.Log.i(TAG, "Starting VPN service")
+                    startForegroundService(intent)
+                    delay(2000) // Give VPN more time to initialize
+                }
+
                 if (checkProxyRunning()) {
-                    binding.buttonToggleProxy.text = "Stop Proxy"
-                    binding.textResult.text = "Proxy is running on port 8888"
+                    binding.buttonToggleProxy.text = "Stop Services"
+                    binding.textResult.text = "VPN and Proxy services are running"
+                    android.util.Log.i(TAG, "Both services started successfully")
                 } else {
-                    binding.buttonToggleProxy.text = "Start Proxy"
-                    binding.textResult.text = "Proxy is not running"
+                    binding.buttonToggleProxy.text = "Start Services"
+                    binding.textResult.text = "Failed to start services"
+                    android.util.Log.e(TAG, "Failed to verify proxy service")
                 }
             } catch (e: Exception) {
-                android.util.Log.e(TAG, "Failed to start proxy service", e)
-                binding.textResult.text = "Failed to start proxy: ${e.message}"
+                android.util.Log.e(TAG, "Failed to start services", e)
+                binding.textResult.text = "Failed to start services: ${e.message}"
             }
         }
     }
@@ -75,26 +183,56 @@ class MainActivity : AppCompatActivity() {
         binding.buttonToggleProxy.setOnClickListener {
             lifecycleScope.launch {
                 if (checkProxyRunning()) {
-                    // Stop proxy
+                    android.util.Log.i(TAG, "Stopping services")
+                    binding.textResult.text = "Stopping services..."
+
+                    // Stop both services
                     proxyServiceIntent?.let { intent ->
                         stopService(intent)
                     }
-                    binding.buttonToggleProxy.text = "Start Proxy"
-                    binding.textResult.text = "Proxy stopped"
+                    vpnServiceIntent?.let { intent ->
+                        stopService(intent)
+                    }
+                    binding.buttonToggleProxy.text = "Start Services"
+                    binding.textResult.text = "Services stopped"
+                    android.util.Log.i(TAG, "Services stopped")
                 } else {
-                    // Start proxy
+                    android.util.Log.i(TAG, "Starting services")
+                    binding.textResult.text = "Starting services..."
+
+                    // Start proxy service first
                     proxyServiceIntent?.let { intent ->
+                        android.util.Log.i(TAG, "Starting proxy service")
                         startForegroundService(intent)
                     }
                     // Wait for proxy to start
                     withContext(Dispatchers.IO) {
                         delay(1000)
                     }
+
+                    // Make sure proxy is running before starting VPN
+                    if (!checkProxyRunning()) {
+                        binding.textResult.text = "Failed to start proxy service"
+                        android.util.Log.e(TAG, "Failed to verify proxy service")
+                        return@launch
+                    }
+
+                    // Start VPN service after proxy is confirmed running
+                    vpnServiceIntent?.let { intent ->
+                        android.util.Log.i(TAG, "Starting VPN service")
+                        startForegroundService(intent)
+                    }
+                    // Wait for VPN to start
+                    withContext(Dispatchers.IO) {
+                        delay(2000)
+                    }
                     if (checkProxyRunning()) {
-                        binding.buttonToggleProxy.text = "Stop Proxy"
-                        binding.textResult.text = "Proxy started on port 8888"
+                        binding.buttonToggleProxy.text = "Stop Services"
+                        binding.textResult.text = "VPN and Proxy services started"
+                        android.util.Log.i(TAG, "Both services started successfully")
                     } else {
-                        binding.textResult.text = "Failed to start proxy"
+                        binding.textResult.text = "Failed to start services"
+                        android.util.Log.e(TAG, "Failed to verify proxy service")
                     }
                 }
             }
@@ -293,7 +431,56 @@ class MainActivity : AppCompatActivity() {
                     InetSocketAddress("127.0.0.1", 8888)
                 ))
             } else {
+                // For direct requests, use NO_PROXY but let the VPN handle routing
                 proxy(Proxy.NO_PROXY)
+                
+                // Use custom DNS resolver that goes through VPN
+                dns(object : Dns {
+                    override fun lookup(hostname: String): List<InetAddress> {
+                        return try {
+                            android.util.Log.d(TAG, "Looking up DNS for $hostname")
+                            InetAddress.getAllByName(hostname).toList()
+                        } catch (e: Exception) {
+                            android.util.Log.e(TAG, "DNS lookup failed for $hostname", e)
+                            throw e
+                        }
+                    }
+                })
+                
+                // Use custom socket factory that goes through VPN
+                socketFactory(object : javax.net.SocketFactory() {
+                    override fun createSocket(): Socket {
+                        return Socket().apply {
+                            // Don't protect the socket - let VPN handle it
+                        }
+                    }
+                    
+                    override fun createSocket(host: String, port: Int): Socket {
+                        return createSocket().apply {
+                            connect(InetSocketAddress(host, port))
+                        }
+                    }
+                    
+                    override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket {
+                        return createSocket().apply {
+                            bind(InetSocketAddress(localHost, localPort))
+                            connect(InetSocketAddress(host, port))
+                        }
+                    }
+                    
+                    override fun createSocket(host: InetAddress, port: Int): Socket {
+                        return createSocket().apply {
+                            connect(InetSocketAddress(host, port))
+                        }
+                    }
+                    
+                    override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int): Socket {
+                        return createSocket().apply {
+                            bind(InetSocketAddress(localAddress, localPort))
+                            connect(InetSocketAddress(address, port))
+                        }
+                    }
+                })
             }
 
             // Add logging interceptor
