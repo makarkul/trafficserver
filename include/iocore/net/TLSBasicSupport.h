@@ -47,6 +47,7 @@ public:
   const char *get_tls_protocol_name() const;
   const char *get_tls_cipher_suite() const;
   const char *get_tls_curve() const;
+  const char *get_tls_group() const;
   ink_hrtime  get_tls_handshake_begin_time() const;
   ink_hrtime  get_tls_handshake_end_time() const;
   /**
@@ -63,6 +64,7 @@ public:
   void set_valid_tls_protocols(unsigned long proto_mask, unsigned long max_mask);
   void set_legacy_cipher_suite(std::string const &cipher_suite);
   void set_cipher_suite(std::string const &cipher_suite);
+  bool set_groups_list(std::string const &groups_list);
 
   /**
    * Give the plugin access to the data structure passed in during the underlying
@@ -83,6 +85,7 @@ protected:
 
   void _record_tls_handshake_begin_time();
   void _record_tls_handshake_end_time();
+  void _update_end_of_handshake_stats();
 
   /**
    * Implementation should schedule either TS_EVENT_SSL_VERIFY_SERVER or TS_EVENT_SSL_VERIFY_CLIENT accordingly.
